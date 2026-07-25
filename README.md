@@ -188,6 +188,9 @@ touch .bridge-paused && launchctl bootout gui/$(id -u)/com.claude-telegram-bridg
 # one-shot test through the real message handler
 node bridge.mjs --selftest "Reply with exactly: OK"
 
+# unit tests for the render/format helpers (offline — never touches Telegram)
+node test.mjs
+
 # uninstall (add --purge to also delete config, state and schedules)
 ./uninstall.sh
 ```

@@ -64,7 +64,14 @@ const CLAUDE_BIN =
 const DEFAULT_CWD = conf('defaultCwd') || (existsSync(path.join(HOME, 'dev')) ? path.join(HOME, 'dev') : HOME);
 const TASK_TIMEOUT_MS = Number(conf('timeoutMs', 30 * 60 * 1000));
 const STALE_SEC = Number(conf('staleSec', 3600));
-const EDIT_INTERVAL_MS = 2500;
+// Telegram allows roughly 20 messages/min per chat, and an edit counts against
+// that. A 2500ms tick is 24 edits/min — over the ceiling on EVERY sustained run,
+// so penalties escalate (observed: a 396s pause). 6000ms = 10/min, which leaves
+// headroom for the answer itself. Liveness is carried by the typing indicator,
+// which costs nothing, not by burning edits.
+const EDIT_INTERVAL_MS = 6000;
+const IDLE_EDIT_MS = 20000; // no new steps? at most one "still alive" edit this often
+const TYPING_INTERVAL_MS = 4000; // Telegram drops the typing indicator after ~5s
 const PROGRESS_TAIL = 3400;
 const TG_MSG_LIMIT = 4000;
 const ANNOUNCE_COOLDOWN_MS = 10 * 60 * 1000;
@@ -133,7 +140,10 @@ function getOpenAIKey() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function tg(method, payload, attempt = 0) {
+// retry429:false — for disposable calls (progress edits, typing indicators).
+// Retrying those is actively harmful: the frame is stale by the time the penalty
+// clears, and each retry extends the throttle window.
+async function tg(method, payload, attempt = 0, { retry429 = true } = {}) {
   const res = await fetch(`${API}/${method}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -142,31 +152,73 @@ async function tg(method, payload, attempt = 0) {
   });
   const data = await res.json().catch(() => ({}));
   if (!data.ok) {
-    if (data.error_code === 429 && attempt < 3) {
-      await sleep((data.parameters?.retry_after || 3) * 1000);
-      return tg(method, payload, attempt + 1);
+    const retryAfter = data.parameters?.retry_after || 0;
+    // Anything reaching here with retry429 still on is a message the user is
+    // meant to READ — an answer, an error, a handback. Waiting out even a long
+    // penalty beats dropping it, so honour retry_after up to 5 minutes.
+    // (Disposable calls opt out via retry429:false and back off instead; capping
+    // this wait low is what silently swallows a final reply.)
+    if (data.error_code === 429 && retry429 && attempt < 3 && retryAfter <= 300) {
+      if (retryAfter > 10) console.error(`[bridge] ${method} throttled — waiting ${retryAfter}s to deliver`);
+      await sleep((retryAfter || 3) * 1000);
+      return tg(method, payload, attempt + 1, { retry429 });
     }
     const err = new Error(`${method}: ${data.error_code} ${data.description || 'unknown'}`);
     err.code = data.error_code;
     err.description = data.description || '';
+    err.retryAfter = retryAfter;
     throw err;
   }
   return data.result;
 }
 
+// Split for Telegram's per-message limit WITHOUT cutting through an HTML tag.
+// A blind slice every `size` chars could land inside `<blockquote expandable>`
+// or between <b> and </b>; Telegram then rejects the chunk and the whole message
+// degrades to plain text, silently losing all formatting on long answers.
+// Prefer a newline boundary, fall back to a space, and only hard-cut when a
+// single line genuinely exceeds the limit (e.g. one enormous <pre> block).
 function chunks(text, size) {
   const out = [];
-  for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
+  let rest = text;
+  while (rest.length > size) {
+    const window = rest.slice(0, size);
+    let cut = window.lastIndexOf('\n');
+    if (cut < size * 0.5) cut = window.lastIndexOf(' '); // don't strand a tiny chunk
+    if (cut < size * 0.5) cut = size; // one unbroken run — hard-cut is the only option
+    // Never cut inside a tag: if the boundary sits after an unclosed '<', back
+    // up to it so the tag moves whole into the next chunk.
+    const open = window.slice(0, cut).lastIndexOf('<');
+    if (open > -1 && window.slice(open, cut).indexOf('>') === -1) cut = open;
+    // Backing up to `open` can land on 0 (an unclosed '<' at the very start of
+    // the window), which would push an empty chunk and leave `rest` untouched —
+    // a synchronous infinite loop that freezes the whole daemon. Never accept a
+    // non-advancing cut: take the hard cut instead. A tag split this way just
+    // makes Telegram reject that chunk, and the caller already falls back to
+    // plain text for it.
+    if (cut <= 0) cut = size;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n/, '');
+  }
+  if (rest) out.push(rest);
   return out.length ? out : [''];
 }
 
-// Send text to the owner chat; tries Markdown, falls back to plain on parse errors.
+// Send text to the chat; tries HTML, falls back to plain on parse errors.
+// parse_mode:'Markdown' is what Telegram itself calls "a legacy mode, retained
+// for backward compatibility" — it can't express underline, strike, spoiler or
+// blockquote, and forbids nested entities. HTML is the same converter the final
+// answers already use, so both paths render identically.
 async function send(text, { markdown = true } = {}) {
   let last = null;
   for (const chunk of chunks(text, TG_MSG_LIMIT)) {
     if (markdown) {
       try {
-        last = await tg('sendMessage', { chat_id: CHAT_ID, text: chunk, parse_mode: 'Markdown' });
+        last = await tg('sendMessage', {
+          chat_id: CHAT_ID,
+          text: mdToTelegramHtml(chunk),
+          parse_mode: 'HTML',
+        });
         continue;
       } catch {
         /* fall through to plain */
@@ -193,14 +245,41 @@ const pendingOps = new Set(); // detached async work (e.g. /context) — selftes
 let finishing = 0; // close handlers still running their async tail (selftest must not exit under them)
 const anyLaneBusy = () => finishing > 0 || Object.values(LANES).some((l) => l.current || l.queue.length);
 
+// A static "Working in /home/you/dev" header looked identical on every run and
+// on every refresh, so a live run was indistinguishable from a frozen one. These
+// cycle as the run progresses — motion is the signal that something is alive.
+const THINKING_WORDS = [
+  'Thinking', 'Pondering', 'Noodling', 'Digging', 'Cooking', 'Churning',
+  'Untangling', 'Wrangling', 'Scheming', 'Poking', 'Mulling', 'Chewing',
+  'Rummaging', 'Percolating', 'Tinkering', 'Puzzling', 'Brewing', 'Sifting',
+];
+// Random start so back-to-back runs don't open on the same word, then step
+// sequentially so a single run never repeats until it has used them all.
+const thinkingWord = (i) => THINKING_WORDS[i % THINKING_WORDS.length];
+const WORD_HOLD_SEC = 12; // how long one word stays up — the knob to tune the pace
+
+const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
+
+// Absolute paths eat a whole phone line and the identifying part is the tail.
+// /home/you/src/my-project/inbox/photo.jpg -> …/inbox/photo.jpg
+function prettyPath(p) {
+  const s = String(p).startsWith(HOME) ? `~${String(p).slice(HOME.length)}` : String(p);
+  const parts = s.split('/');
+  return parts.length > 4 ? `…/${parts.slice(-2).join('/')}` : s;
+}
+
 function summarizeToolInput(input) {
   if (!input || typeof input !== 'object') return '';
-  // description before prompt: Agent dispatches carry a huge prompt but a tidy description
-  const pick =
-    input.command ?? input.file_path ?? input.pattern ?? input.url ?? input.query ?? input.description ?? input.prompt;
+  // `description` is written FOR a human — prefer it over every raw payload.
+  // A Bash `command` is shell scaffolding (echo banners, absolute paths, 2>&1)
+  // that reads as noise on a phone; an Agent `prompt` is enormous. Both carry a
+  // tidy description, so this one reorder is most of the readability win.
+  if (input.description) return clip(String(input.description).replace(/\s+/g, ' '), 70);
+  const file = input.file_path ?? input.notebook_path;
+  if (file) return clip(prettyPath(file), 70);
+  const pick = input.command ?? input.pattern ?? input.url ?? input.query ?? input.prompt;
   if (pick == null) return '';
-  const s = String(pick).replace(/\s+/g, ' ');
-  return s.length > 70 ? s.slice(0, 70) + '…' : s;
+  return clip(String(pick).replace(/\s+/g, ' '), 70);
 }
 
 const TOOL_EMOJI = {
@@ -239,11 +318,24 @@ function toolEntry(block, isSubagent) {
 const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 function renderEntry(e, html) {
-  if (e.kind === 'text') return html ? escHtml(e.text) : e.text;
+  // Narration between tool calls is written for the final answer, not for a
+  // progress ticker — a full paragraph per step is what turns this into a wall.
+  if (e.kind === 'text') {
+    const t = clip(e.text.replace(/\s+/g, ' '), 140);
+    return html ? `<i>${escHtml(t)}</i>` : t;
+  }
   const indent = e.sub ? '  ↳ ' : '';
-  if (html) return `${indent}${e.emoji} <b>${escHtml(e.name)}</b>${e.arg ? ` <code>${escHtml(e.arg)}</code>` : ''}`;
-  return `${indent}${e.emoji} ${e.name}${e.arg ? `: ${e.arg}` : ''}`;
+  // No <code> around the arg: these lines live inside a blockquote, and code/pre
+  // entities may not nest there — Telegram rejects the whole message.
+  if (html) return `${indent}${e.emoji} <b>${escHtml(e.name)}</b>${e.arg ? ` ${escHtml(e.arg)}` : ''}`;
+  return `${indent}${e.emoji} ${e.name}${e.arg ? ` ${e.arg}` : ''}`;
 }
+
+// The step log is reference material, not the message — collapse it behind
+// Telegram's expandable blockquote so the bubble stays one scannable header.
+// Only <b>/<i> go inside: the spec lets those nest in any entity, while <code>
+// and <pre> may not, and blockquotes can never nest.
+const quoteBlock = (body) => (body ? `\n<blockquote expandable>${body}</blockquote>` : '');
 
 // Newest-first fill so the tail always fits without slicing mid-HTML-tag.
 function renderTail(entries, html, maxChars) {
@@ -260,12 +352,32 @@ function renderTail(entries, html, maxChars) {
 
 // Edit a progress message with HTML formatting, falling back to plain text if
 // Telegram rejects the entity parse. "message is not modified" 400s are noise.
+// Progress edits are suppressed until this timestamp after a 429. Module-level
+// so every lane backs off together — the limit is per-CHAT, not per-message.
+let editCooldownUntil = 0;
+
 async function editProgress(messageId, htmlText, plainTextFn) {
   try {
-    await tg('editMessageText', { chat_id: CHAT_ID, message_id: messageId, text: htmlText, parse_mode: 'HTML' });
+    await tg(
+      'editMessageText',
+      { chat_id: CHAT_ID, message_id: messageId, text: htmlText, parse_mode: 'HTML' },
+      0,
+      { retry429: false },
+    );
   } catch (e) {
-    if (e.code === 400 && /parse|entit/i.test(e.description || '')) {
-      await tg('editMessageText', { chat_id: CHAT_ID, message_id: messageId, text: plainTextFn() }).catch(() => {});
+    if (e.code === 429) {
+      // Back off for the whole window Telegram asked for (+1s of slack) instead
+      // of retrying into it, which is what escalates a 4s penalty into minutes
+      // and freezes the bubble mid-run.
+      editCooldownUntil = Date.now() + (e.retryAfter || 5) * 1000 + 1000;
+      console.error(`[bridge] progress edits paused ${e.retryAfter || 5}s (429)`);
+    } else if (e.code === 400 && /parse|entit/i.test(e.description || '')) {
+      await tg(
+        'editMessageText',
+        { chat_id: CHAT_ID, message_id: messageId, text: plainTextFn() },
+        0,
+        { retry429: false },
+      ).catch(() => {});
     } else if (e.code !== 400) {
       console.error('[bridge] edit failed:', e.message);
     }
@@ -304,14 +416,33 @@ function runClaude(rawText, lane = LANES.main) {
     const toolLines = []; // tool activity only, shown in the final "Done" edit (answer text would duplicate the result message)
     let progressMsgId = null;
     let lastRendered = '';
+    let lastRenderedBody = ''; // step list only — the header's timer is excluded on purpose
+    let lastEditAt = 0;
     let resultEvent = null;
+    // Context-window gauge. Must come from the LAST main-thread assistant message,
+    // NOT resultEvent.usage — that one is cumulative over every API round trip in
+    // the run, so cache_read re-counts the whole context once per tool call and the
+    // total runs several times the window (observed: 1.75M "of" a 1M window).
+    let lastUsage = null;
     let stderrTail = '';
     let finished = false;
+    const wordSeed = Math.floor(Math.random() * THINKING_WORDS.length);
+
+    // Only the chat lane gets a LIVE bubble. A bg job's output reaches the user
+    // through handBackToChat and bg-results.jsonl, so ticking edits at its bubble
+    // is rate-limit spend against the SAME per-chat bucket the conversation
+    // needs. It still gets one start message and one final edit — a backgrounded
+    // job is never silent, it just stops costing 10 edits/min while it runs.
+    const liveProgress = lane === LANES.main;
 
     try {
       const m = await tg('sendMessage', {
         chat_id: CHAT_ID,
-        text: `${lane.icon} ${lane.noun} in ${cwd} …${lane === LANES.bg ? ' (chat stays open)' : ''}`,
+        // cwd is the same string on nearly every run — it was pure noise here.
+        // /status still reports it when it actually matters.
+        text: liveProgress
+          ? `${lane.icon} ${thinkingWord(wordSeed)}…`
+          : `${lane.icon} Running in the background — the chat stays open.`,
       });
       progressMsgId = m.message_id;
     } catch (e) {
@@ -328,7 +459,12 @@ function runClaude(rawText, lane = LANES.main) {
           text: '🛑 Stopped before start.',
         }).catch(() => {});
       resolve();
-      drainQueue();
+      // Was drainQueue() with no argument — `lane.current` on undefined throws,
+      // and because the throw lands in an already-resolved Promise executor it is
+      // swallowed silently, stranding anything queued in the /stop race (queue
+      // cleared by /stop, THEN a new message arrives while this run is still
+      // tearing down) until some later run happened to finish.
+      drainQueue(lane);
       return;
     }
 
@@ -357,23 +493,60 @@ function runClaude(rawText, lane = LANES.main) {
       }
     }, TASK_TIMEOUT_MS);
 
+    let rendering = false;
     const renderProgress = async () => {
       if (progressMsgId == null) return;
+      // setInterval does NOT await the previous tick. Without this guard a slow
+      // or throttled edit lets ticks stack up, and every one of them issues its
+      // own request — that pile-up is what turns one 429 into a cascade.
+      if (rendering || Date.now() < editCooldownUntil) return;
+      rendering = true;
+      try {
+        await renderProgressInner();
+      } finally {
+        rendering = false;
+      }
+    };
+    const renderProgressInner = async () => {
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       const steps = toolLines.length;
       const recent = progress.slice(-12); // keep the live bubble scannable on a phone
-      const header = `<b>${lane.icon} ${lane.noun}</b> · ${elapsed}s${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
-      const htmlOut = `${header}\n${renderTail(recent, true, PROGRESS_TAIL)}`.slice(0, TG_MSG_LIMIT);
-      if (htmlOut === lastRendered) return;
+      // Keyed to elapsed TIME, not the render count — one word per tick flickered,
+      // and tying it to ticks meant the rate drifted with the render cadence and
+      // jumped after a rate-limit pause.
+      const word = thinkingWord(wordSeed + Math.floor(elapsed / WORD_HOLD_SEC));
+      const header = `<b>${lane.icon} ${word}…</b> · ${elapsed}s${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
+      const body = quoteBlock(renderTail(recent, true, PROGRESS_TAIL));
+      const htmlOut = `${header}${body}`.slice(0, TG_MSG_LIMIT);
+      // The old dedup compared the WHOLE message, but the header carries a
+      // per-second counter, so it never matched and every tick spent an edit just
+      // to advance a number. Compare the step list instead: burn edits when
+      // something actually happened, and while thinking, refresh only rarely.
+      if (body === lastRenderedBody && Date.now() - lastEditAt < IDLE_EDIT_MS) return;
+      lastRenderedBody = body;
+      lastEditAt = Date.now();
       lastRendered = htmlOut;
       await editProgress(progressMsgId, htmlOut, () =>
-        `${lane.icon} ${lane.noun} (${elapsed}s · ${steps} steps)\n${renderTail(recent, false, PROGRESS_TAIL)}`.slice(
+        `${lane.icon} ${word}… (${elapsed}s · ${steps} steps)\n${renderTail(recent, false, PROGRESS_TAIL)}`.slice(
           0,
           TG_MSG_LIMIT,
         ),
       );
     };
-    const editTimer = setInterval(renderProgress, EDIT_INTERVAL_MS);
+    const editTimer = liveProgress ? setInterval(renderProgress, EDIT_INTERVAL_MS) : null;
+
+    // "typing…" under the bot name. Telegram clears the indicator after ~5s, so
+    // it has to be re-sent to stay lit for a whole run. Chat actions create no
+    // message and are cheap, but they're still disposable — never retry one
+    // (retry429:false) and never let a failure surface.
+    // Chat lane only: the bg lane deliberately leaves the chat usable, so
+    // claiming "typing" while the user is free to talk would be a lie.
+    const sendTyping = () => {
+      if (!liveProgress) return;
+      tg('sendChatAction', { chat_id: CHAT_ID, action: 'typing' }, 0, { retry429: false }).catch(() => {});
+    };
+    sendTyping(); // immediately, so it shows before the first tool call lands
+    const typingTimer = liveProgress ? setInterval(sendTyping, TYPING_INTERVAL_MS) : null;
 
     const rl = readline.createInterface({ input: child.stdout });
     rl.on('line', (line) => {
@@ -386,6 +559,9 @@ function runClaude(rawText, lane = LANES.main) {
       if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
         const isSubagent = Boolean(ev.parent_tool_use_id); // subagent events carry the spawning tool's id
         if (ev.message.model && !isSubagent) run.model = ev.message.model;
+        // Subagents have their own separate context — their usage says nothing
+        // about how full THIS session is.
+        if (!isSubagent && ev.message.usage) lastUsage = ev.message.usage;
         for (const block of ev.message.content) {
           if (block.type === 'text' && block.text?.trim()) {
             if (!isSubagent) progress.push({ kind: 'text', text: block.text.trim() }); // subagent prose is noise; their tool calls tell the story
@@ -410,6 +586,7 @@ function runClaude(rawText, lane = LANES.main) {
       finished = true;
       clearTimeout(killTimer);
       clearInterval(editTimer);
+      clearInterval(typingTimer);
       if (lane.current === run) lane.current = null;
       await send(`❌ Failed to launch claude: ${e.message}`).catch(() => {});
       resolve();
@@ -421,10 +598,12 @@ function runClaude(rawText, lane = LANES.main) {
       finished = true;
       clearTimeout(killTimer);
       clearInterval(editTimer);
+      clearInterval(typingTimer);
       rl.close();
       const wasStopped = run.stopped;
       if (lane.current === run) lane.current = null;
       finishing++; // decremented at the end of this handler
+      lane.finishing = (lane.finishing || 0) + 1; // per-lane copy so /status can see this window
       const elapsed = Math.round((Date.now() - startedAt) / 1000);
       if (SELFTEST && resultEvent?.result) console.log('[selftest result]', String(resultEvent.result).slice(0, 600));
 
@@ -434,8 +613,10 @@ function runClaude(rawText, lane = LANES.main) {
         st[lane.sessionKey] = resultEvent.session_id;
       }
       if (run.model) st.lastModel = run.model;
-      if (resultEvent?.usage) {
-        const u = resultEvent.usage;
+      if (lastUsage) {
+        const u = lastUsage;
+        // One message's input + cache reads + cache writes = what the model actually
+        // had in front of it on that call, i.e. current context depth.
         st[lane.ctxKey] =
           (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       }
@@ -465,7 +646,7 @@ function runClaude(rawText, lane = LANES.main) {
         const htmlBody = renderTail(toolLines, true, PROGRESS_TAIL);
         await editProgress(
           progressMsgId,
-          `<b>${head}</b> · ${meta}${htmlBody ? '\n' + htmlBody : ''}`.slice(0, TG_MSG_LIMIT),
+          `<b>${head}</b> · ${meta}${quoteBlock(htmlBody)}`.slice(0, TG_MSG_LIMIT),
           () => `${head} (${meta})\n${renderTail(toolLines, false, PROGRESS_TAIL)}`.slice(0, TG_MSG_LIMIT),
         );
       }
@@ -494,6 +675,7 @@ function runClaude(rawText, lane = LANES.main) {
         await send('⚠️ Run ended with no result output.').catch(() => {});
       }
       finishing--;
+      if (lane.finishing) lane.finishing--;
       resolve();
       drainQueue(lane);
     });
@@ -719,8 +901,10 @@ function modelWindow(name) {
 // touches their contents. Sender falls back to plain text on any parse reject.
 function mdToTelegramHtml(md) {
   const fences = [];
-  let t = md.replace(/```[\w-]*\n?([\s\S]*?)```/g, (_, code) => {
-    fences.push(`<pre>${escHtml(code.replace(/\n$/, ''))}</pre>`);
+  // Keep the fence language — Telegram syntax-highlights <pre><code class="language-x">.
+  let t = md.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const body = escHtml(code.replace(/\n$/, ''));
+    fences.push(lang ? `<pre><code class="language-${escHtml(lang)}">${body}</code></pre>` : `<pre>${body}</pre>`);
     return `\u0000${fences.length - 1}\u0000`;
   });
   const inline = [];
@@ -731,8 +915,29 @@ function mdToTelegramHtml(md) {
   t = escHtml(t);
   t = t.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
   t = t.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
-  t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2">$1</a>');
+  // Italic runs AFTER bold so ** is already consumed. Only *…* — underscores
+  // would eat snake_case identifiers in prose. The delimiters must hug
+  // non-space, per CommonMark: without that, prose like "3 * 4 and 2 * 5" pairs
+  // two unrelated asterisks and italicises everything between them, and a
+  // bullet ending in '*' turns into emphasis instead of a list item.
+  t = t.replace(/(^|[\s(])\*(\S(?:[^*\n]*\S)?)\*(?=$|[\s.,;:!?)])/g, '$1<i>$2</i>');
+  // A " inside the URL would break out of the href attribute; &quot; is one of
+  // the four named entities Telegram accepts.
+  t = t.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+    (_, label, href) => `<a href="${href.replace(/"/g, '&quot;')}">${label}</a>`,
+  );
   t = t.replace(/^(\s*)[-*]\s+/gm, '$1• ');
+  // Markdown "> quote" — escHtml already turned the marker into &gt;.
+  // Consecutive quoted lines collapse into ONE blockquote (they can't nest).
+  t = t.replace(/(?:^&gt;[ \t]?.*(?:\n|$))+/gm, (blk) => {
+    const body = blk
+      .replace(/\n$/, '')
+      .split('\n')
+      .map((l) => l.replace(/^&gt;[ \t]?/, ''))
+      .join('\n');
+    return `<blockquote>${body}</blockquote>\n`;
+  });
   t = t.replace(/\u0001(\d+)\u0001/g, (_, i) => inline[i]);
   t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => fences[i]);
   return t;
@@ -752,8 +957,14 @@ async function sendResult(text) {
   for (const chunk of chunks(html, TG_MSG_LIMIT)) {
     try {
       await tg('sendMessage', { chat_id: CHAT_ID, text: chunk, parse_mode: 'HTML' });
-    } catch {
-      await tg('sendMessage', { chat_id: CHAT_ID, text: stripHtml(chunk) }).catch(() => {});
+    } catch (e) {
+      try {
+        await tg('sendMessage', { chat_id: CHAT_ID, text: stripHtml(chunk) });
+      } catch (e2) {
+        // A swallowed failure here means the user's ANSWER vanished with the run
+        // still reporting "✅ Done" — the worst possible silent failure.
+        console.error(`[bridge] RESULT NOT DELIVERED (${e2.message}; first attempt: ${e.message})`);
+      }
     }
   }
 }
@@ -911,9 +1122,15 @@ async function handleCommand(text) {
           ? `${Math.round((Date.now() - l.current.startedAt) / 1000)}s: "${l.current.prompt.slice(0, 60)}"${
               l.queue.length ? ` (+${l.queue.length} queued)` : ''
             }`
-          : l.queue.length
-            ? `idle (+${l.queue.length} queued)`
-            : 'idle';
+          : // `current` is cleared before the close handler's async tail (progress
+            // edit + result send + handback), and the queue only drains after it.
+            // Reporting "idle (+N queued)" during that window reads as a stuck
+            // queue when it's really mid-handoff — anyLaneBusy() already counts it.
+            l.finishing
+            ? `wrapping up (+${l.queue.length} queued)`
+            : l.queue.length
+              ? `idle (+${l.queue.length} queued)`
+              : 'idle';
       const busy = `${LANES.main.icon} chat ${laneStatus(LANES.main)} · ${LANES.bg.icon} bg ${laneStatus(LANES.bg)}`;
       await send(
         [
