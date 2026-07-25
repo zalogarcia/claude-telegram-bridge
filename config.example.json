@@ -1,0 +1,28 @@
+{
+  "botToken": "123456789:AAF-your-token-from-BotFather",
+  "chatId": "123456789",
+
+  "defaultCwd": "",
+  "claudeBin": "",
+
+  "model": "",
+  "effort": "",
+  "yolo": "true",
+  "ownerName": "the owner",
+
+  "timeoutMs": 1800000,
+  "staleSec": 3600,
+
+  "_comments": {
+    "defaultCwd": "Where sessions start. Empty = ~/dev if it exists, else $HOME.",
+    "claudeBin": "Path to the claude CLI. Empty = auto-detect.",
+    "model": "Empty = whatever your claude CLI defaults to. Or e.g. 'opus', 'sonnet', 'haiku'.",
+    "effort": "Empty = CLI default. Or 'low' | 'medium' | 'high' | 'xhigh'.",
+    "yolo": "'true' passes --dangerously-skip-permissions (headless runs can't answer prompts). 'false' uses acceptEdits.",
+    "ownerName": "What the assistant calls you when reporting on background work.",
+    "timeoutMs": "Kill a task after this long. Default 30 minutes.",
+    "staleSec": "Ignore messages older than this (e.g. queued while the machine slept). Default 1 hour.",
+    "openaiApiKey": "Optional. For Whisper voice-note transcription. Usually better set as $OPENAI_API_KEY.",
+    "env-override": "Any key can be overridden with BRIDGE_<UPPER_SNAKE_CASE>, e.g. BRIDGE_DEFAULT_CWD."
+  }
+}

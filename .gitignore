@@ -1,0 +1,15 @@
+# secrets + local state — never commit these
+config.json
+state.json
+schedules.json
+bg-queue.json
+bg-results.jsonl
+heartbeat
+.bridge-paused
+.watchdog-strike
+.watchdog-fails
+inbox/
+*.log
+*.tmp
+node_modules/
+.DS_Store

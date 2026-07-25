@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>claude-telegram-bridge — Claude Code, from your phone</title>
+<meta name="description" content="An always-on bridge between Telegram and the Claude Code running on your own machine. No tunnel, no cloud, no open ports." />
+<style>
+/* ─────────────────────────────────────────────
+   Tokens. Light is the base; dark redefines them.
+   The viewer's toggle (data-theme) wins both ways.
+   ───────────────────────────────────────────── */
+:root {
+  --bg:        #F4F6F8;
+  --surface:   #FFFFFF;
+  --surface-2: #EDF1F5;
+  --line:      #DCE3EA;
+  --line-soft: #E8EDF2;
+  --text:      #10151B;
+  --dim:       #5C6875;
+  --faint:     #8B97A5;
+  --ember:     #C15A16;   /* the machine, working */
+  --ember-soft:#F3E2D5;
+  --steel:     #4E7392;   /* the remote link */
+  --shadow:    0 1px 2px rgba(16,21,27,.06), 0 12px 32px -12px rgba(16,21,27,.18);
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Avenir Next", Avenir, "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0E1116;
+    --surface:   #161C24;
+    --surface-2: #1C242E;
+    --line:      #262F3B;
+    --line-soft: #1E2630;
+    --text:      #E7EAEE;
+    --dim:       #98A3B1;
+    --faint:     #6C7885;
+    --ember:     #E07A3F;
+    --ember-soft:#2A1D14;
+    --steel:     #7FA0BC;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 18px 40px -16px rgba(0,0,0,.6);
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#0E1116; --surface:#161C24; --surface-2:#1C242E; --line:#262F3B; --line-soft:#1E2630;
+  --text:#E7EAEE; --dim:#98A3B1; --faint:#6C7885; --ember:#E07A3F; --ember-soft:#2A1D14; --steel:#7FA0BC;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 40px -16px rgba(0,0,0,.6);
+}
+:root[data-theme="light"] {
+  --bg:#F4F6F8; --surface:#FFFFFF; --surface-2:#EDF1F5; --line:#DCE3EA; --line-soft:#E8EDF2;
+  --text:#10151B; --dim:#5C6875; --faint:#8B97A5; --ember:#C15A16; --ember-soft:#F3E2D5; --steel:#4E7392;
+  --shadow:0 1px 2px rgba(16,21,27,.06), 0 12px 32px -12px rgba(16,21,27,.18);
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+::selection { background: var(--ember); color: var(--bg); }
+:focus-visible { outline: 2px solid var(--ember); outline-offset: 3px; border-radius: 2px; }
+
+.wrap { width: min(1080px, calc(100% - 2.5rem)); margin-inline: auto; }
+
+/* Section rhythm — a single owner for vertical space. */
+section { padding-block: clamp(4rem, 9vw, 7rem); }
+section + section { border-top: 1px solid var(--line-soft); }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: .72rem;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--faint);
+  margin: 0 0 1.1rem;
+  display: flex; align-items: center; gap: .7rem;
+}
+.eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+h1, h2, h3 { font-family: var(--mono); font-weight: 600; letter-spacing: -.03em; text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.1rem, 6vw, 3.6rem); line-height: 1.05; }
+h2 { font-size: clamp(1.5rem, 3.2vw, 2.1rem); line-height: 1.15; margin-bottom: 1rem; }
+h3 { font-size: 1.02rem; letter-spacing: -.01em; }
+p { margin: 0 0 1.1rem; max-width: 66ch; color: var(--dim); }
+p strong { color: var(--text); font-weight: 600; }
+.lede { font-size: 1.12rem; color: var(--dim); }
+
+/* ── Header ─────────────────────────────── */
+header.top {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--line-soft);
+}
+.top-in { display: flex; align-items: center; gap: 1.2rem; padding-block: .85rem; }
+.mark { font-family: var(--mono); font-size: .88rem; font-weight: 600; letter-spacing: -.02em; display: flex; align-items: center; gap: .55rem; }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 0 3px var(--ember-soft); flex: none; }
+.top nav { margin-left: auto; display: flex; gap: 1.4rem; align-items: center; font-size: .85rem; }
+.top nav a { color: var(--dim); text-decoration: none; }
+.top nav a:hover { color: var(--text); }
+@media (max-width: 640px) { .top nav a.hide-s { display: none; } }
+
+/* ── Hero ───────────────────────────────── */
+.hero { padding-top: clamp(3rem, 7vw, 5.5rem); padding-bottom: clamp(3rem, 7vw, 5rem); }
+.hero-grid { display: grid; grid-template-columns: 1fr; gap: clamp(2.5rem, 5vw, 4rem); align-items: start; }
+@media (min-width: 900px) { .hero-grid { grid-template-columns: 1.05fr .95fr; } }
+.hero h1 span { color: var(--ember); }
+.hero .lede { margin-top: 1.3rem; }
+
+.badges { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.6rem; }
+.badge {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--dim); border: 1px solid var(--line); border-radius: 100px; padding: .3rem .7rem;
+  background: var(--surface);
+}
+
+/* Install command */
+.cmd {
+  margin-top: 1.8rem; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: var(--shadow); overflow: hidden;
+}
+.cmd-head {
+  display: flex; align-items: center; gap: .6rem; padding: .55rem .9rem;
+  border-bottom: 1px solid var(--line-soft); font-family: var(--mono);
+  font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: var(--faint);
+}
+.cmd-body { display: flex; align-items: flex-start; gap: .8rem; padding: .95rem 1rem; }
+.cmd code {
+  font-family: var(--mono); font-size: .82rem; line-height: 1.9; color: var(--text);
+  white-space: pre; overflow-x: auto; display: block; flex: 1;
+}
+.cmd code .p { color: var(--ember); user-select: none; }
+button.copy {
+  font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--dim); background: var(--surface-2); border: 1px solid var(--line);
+  border-radius: 6px; padding: .35rem .6rem; cursor: pointer; flex: none;
+  transition: color .15s, border-color .15s;
+}
+button.copy:hover { color: var(--text); border-color: var(--faint); }
+button.copy.done { color: var(--ember); border-color: var(--ember); }
+
+/* ── Chat thread mock ───────────────────── */
+.thread {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.thread-bar {
+  display: flex; align-items: center; gap: .6rem; padding: .7rem .9rem;
+  border-bottom: 1px solid var(--line-soft); background: var(--surface-2);
+}
+.avatar {
+  width: 26px; height: 26px; border-radius: 50%; flex: none;
+  background: linear-gradient(150deg, var(--ember), var(--steel));
+  display: grid; place-items: center; font-family: var(--mono); font-size: .72rem;
+  font-weight: 700; color: #fff;
+}
+.thread-bar b { font-size: .85rem; font-weight: 600; }
+.thread-bar small { font-family: var(--mono); font-size: .68rem; color: var(--faint); margin-left: auto; }
+.msgs { padding: 1rem .9rem 1.2rem; display: flex; flex-direction: column; gap: .55rem; min-height: 340px; }
+.msg { max-width: 86%; padding: .6rem .8rem; border-radius: 12px; font-size: .87rem; line-height: 1.5; }
+.msg.me { align-self: flex-end; background: var(--steel); color: #fff; border-bottom-right-radius: 4px; }
+.msg.bot { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--line-soft); border-bottom-left-radius: 4px; }
+.msg.work { font-family: var(--mono); font-size: .76rem; line-height: 1.75; }
+.msg.work .hdr { color: var(--ember); font-weight: 600; }
+.msg.work .tool { color: var(--dim); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg.work .sub { padding-left: 1.1rem; color: var(--faint); }
+
+/* load-in choreography */
+.reveal { opacity: 0; transform: translateY(6px); }
+.played .reveal { animation: rise .45s cubic-bezier(.2,.7,.3,1) forwards; }
+@keyframes rise { to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; }
+  .played .reveal { animation: none; }
+}
+
+/* ── Architecture ───────────────────────── */
+.arch { display: grid; gap: .6rem; margin-top: 2rem; font-family: var(--mono); font-size: .8rem; }
+.node {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 8px;
+  padding: .8rem 1rem; display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap;
+}
+.node b { font-weight: 600; letter-spacing: -.01em; }
+.node span { color: var(--faint); font-size: .74rem; }
+.node.lane-a { border-left: 2px solid var(--ember); }
+.node.lane-b { border-left: 2px solid var(--steel); }
+.link {
+  padding-left: 1.1rem; color: var(--faint); font-size: .72rem;
+  display: flex; align-items: center; gap: .5rem;
+}
+.link::before { content: "↓"; color: var(--ember); }
+.link.up::before { content: "↑"; color: var(--steel); }
+.indent { margin-left: clamp(0px, 4vw, 2.4rem); }
+
+/* ── Feature list ───────────────────────── */
+.feats { display: grid; gap: 0; margin-top: 2rem; border-top: 1px solid var(--line-soft); }
+.feat {
+  display: grid; gap: .35rem 1.6rem; padding: 1.4rem 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+@media (min-width: 760px) { .feat { grid-template-columns: 13.5rem 1fr; } }
+.feat h3 { color: var(--text); }
+.feat p { margin: 0; font-size: .95rem; }
+.feat .tag {
+  font-family: var(--mono); font-size: .66rem; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--ember); display: block; margin-bottom: .2rem;
+}
+
+/* ── Steps ──────────────────────────────── */
+.steps { counter-reset: s; display: grid; gap: 1.6rem; margin-top: 2rem; }
+.step { display: grid; grid-template-columns: 2rem 1fr; gap: 1rem; align-items: start; }
+.step::before {
+  counter-increment: s; content: counter(s, decimal-leading-zero);
+  font-family: var(--mono); font-size: .78rem; color: var(--ember);
+  border: 1px solid var(--line); border-radius: 6px; width: 2rem; height: 2rem;
+  display: grid; place-items: center; background: var(--surface);
+}
+.step h3 { margin-bottom: .25rem; }
+.step p { margin: 0; font-size: .95rem; }
+.step code, .inline {
+  font-family: var(--mono); font-size: .84em; background: var(--surface-2);
+  border: 1px solid var(--line-soft); border-radius: 4px; padding: .08em .35em; color: var(--text);
+}
+
+/* ── Table ──────────────────────────────── */
+.scroll { overflow-x: auto; margin-top: 2rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 34rem; }
+th, td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+th {
+  font-family: var(--mono); font-size: .68rem; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--faint); font-weight: 500; background: var(--surface-2);
+}
+tr:last-child td { border-bottom: 0; }
+td:first-child { font-family: var(--mono); font-size: .82rem; color: var(--ember); white-space: nowrap; }
+td:last-child { color: var(--dim); }
+
+/* ── Security ───────────────────────────── */
+.warn {
+  border: 1px solid var(--line); border-left: 2px solid var(--ember);
+  background: var(--surface); border-radius: 8px; padding: 1.1rem 1.3rem; margin-top: 2rem;
+}
+.warn p:last-child { margin-bottom: 0; }
+.sec-list { display: grid; gap: 1.1rem; margin-top: 1.8rem; padding: 0; list-style: none; }
+.sec-list li { padding-left: 1.3rem; position: relative; color: var(--dim); font-size: .95rem; max-width: 68ch; }
+.sec-list li::before {
+  content: ""; position: absolute; left: 0; top: .62em; width: 6px; height: 6px;
+  border-radius: 1px; background: var(--steel); transform: rotate(45deg);
+}
+.sec-list b { color: var(--text); font-weight: 600; }
+
+/* ── CTA + footer ───────────────────────── */
+.cta { text-align: center; }
+.cta .cmd { max-width: 44rem; margin-inline: auto; text-align: left; }
+.btn {
+  display: inline-flex; align-items: center; gap: .5rem; margin-top: 1.6rem;
+  font-family: var(--mono); font-size: .82rem; text-decoration: none;
+  color: var(--bg); background: var(--text); border-radius: 8px; padding: .7rem 1.15rem;
+  transition: transform .15s ease;
+}
+.btn:hover { transform: translateY(-1px); }
+footer {
+  border-top: 1px solid var(--line-soft); padding-block: 2.5rem 3.5rem;
+  font-size: .82rem; color: var(--faint);
+}
+footer a { color: var(--dim); }
+.foot-in { display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; align-items: baseline; }
+.foot-in .sp { margin-left: auto; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap top-in">
+    <span class="mark"><span class="dot"></span>claude-telegram-bridge</span>
+    <nav>
+      <a href="#how" class="hide-s">How it works</a>
+      <a href="#install">Install</a>
+      <a href="#security">Security</a>
+      <a href="https://github.com/zalogarcia/claude-telegram-bridge">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="wrap hero-grid">
+    <div>
+      <div class="badges">
+        <span class="badge">MIT</span>
+        <span class="badge">Node 18+</span>
+        <span class="badge">macOS · Linux</span>
+        <span class="badge">No tunnel</span>
+      </div>
+      <h1>Claude Code,<br />from your <span>phone</span>.</h1>
+      <p class="lede">
+        An always-on bridge between Telegram and the Claude Code running on your own
+        machine. It reads your repos, uses your config, keeps your sessions — and
+        answers you while you're out.
+      </p>
+      <p>
+        Nothing inbound ever reaches your computer. No tunnel, no webhook, no open
+        port, no third-party relay: your machine calls Telegram, never the reverse.
+      </p>
+
+      <div class="cmd">
+        <div class="cmd-head">Install</div>
+        <div class="cmd-body">
+<code id="cmd-text"><span class="p">$</span> git clone https://github.com/zalogarcia/claude-telegram-bridge.git ~/claude-telegram-bridge
+<span class="p">$</span> cd ~/claude-telegram-bridge && ./install.sh</code>
+          <button class="copy" data-copy="#cmd-text" type="button">Copy</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="thread" id="thread">
+      <div class="thread-bar">
+        <span class="avatar">M</span>
+        <b>your bot</b>
+        <small>online</small>
+      </div>
+      <div class="msgs" id="msgs">
+        <div class="msg me reveal" style="animation-delay:.15s">what's failing in the checkout tests?</div>
+        <div class="msg bot work reveal" style="animation-delay:.5s">
+          <span class="hdr">🤖 Working · <span id="secs">8</span>s · <span id="steps">2</span> steps</span>
+          <span class="tool">💻 Bash <span style="color:var(--faint)">npm test -- checkout</span></span>
+          <span class="tool">📖 Read <span style="color:var(--faint)">src/checkout/validate.ts</span></span>
+          <span class="tool" id="t3" style="opacity:0">✏️ Edit <span style="color:var(--faint)">src/checkout/validate.ts</span></span>
+        </div>
+        <div class="msg bot reveal" style="animation-delay:2.6s">
+          Two tests fail on the same cause: <b>validateCart()</b> returns early when
+          <b>items</b> is empty, so the discount branch never runs. Fixed it and re-ran —
+          all 14 pass.
+        </div>
+        <div class="msg me reveal" style="animation-delay:3.4s">nice. run the full suite in the background</div>
+        <div class="msg bot reveal" style="animation-delay:4.1s">
+          🌙 Started the full suite in the background lane — keep talking, I'll report
+          when it lands.
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <div class="wrap">
+    <p class="eyebrow">How it works</p>
+    <h2>A daemon on your machine, holding one end of the line.</h2>
+    <p>
+      About 1,400 lines of Node long-poll the Telegram Bot API and pipe whatever you
+      send into <span class="inline">claude -p</span>. Your service manager keeps it
+      alive; a watchdog catches the rare wedge and tells you it did.
+    </p>
+
+    <div class="arch">
+      <div class="node"><b>Telegram app</b> <span>your phone — text, voice notes, photos, files</span></div>
+      <div class="link">message</div>
+      <div class="node"><b>Telegram Bot API</b> <span>the only thing either side talks to</span></div>
+      <div class="link up">long poll · outbound HTTPS from your machine</div>
+      <div class="node"><b>bridge.mjs</b> <span>your machine · launchd or systemd · watchdog</span></div>
+      <div class="indent">
+        <div class="link">routes by length</div>
+        <div class="node lane-a"><b>🤖 chat lane</b> <span>claude -p --resume · always answerable</span></div>
+        <div class="node lane-b" style="margin-top:.6rem"><b>🌙 background lane</b> <span>long jobs, scheduled tasks · separate session</span></div>
+        <div class="link" style="margin-top:.6rem">on completion, the report goes to the chat lane —<br />which summarizes it for you in plain words</div>
+      </div>
+    </div>
+
+    <div class="feats" style="margin-top:3rem">
+      <div class="feat">
+        <div><span class="tag">the hard part</span><h3>Two lanes</h3></div>
+        <p>
+          A headless Claude run occupies its process until it finishes — so a
+          twenty-minute job would normally mean twenty minutes of silence. Long
+          commands, scheduled tasks, and anything the assistant judges slow run in a
+          <em>second</em> Claude session instead. You keep chatting while they work.
+        </p>
+      </div>
+      <div class="feat">
+        <div><span class="tag">the nice part</span><h3>Workers report to the assistant</h3></div>
+        <p>
+          When a background job finishes, its output goes to your chat session — not
+          dumped on you. The assistant reads it, finishes anything left undone, and
+          sends a short human update. You get a colleague, not a log stream.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <p class="eyebrow">What you get</p>
+    <h2>Everything the terminal does, minus the terminal.</h2>
+
+    <div class="feats">
+      <div class="feat">
+        <div><span class="tag">memory</span><h3>Sessions that persist</h3></div>
+        <p>Ask something today, follow up tomorrow — same conversation. Survives restarts, reboots and sleep. <span class="inline">/new</span> when you want a clean slate, <span class="inline">/cd</span> to switch projects.</p>
+      </div>
+      <div class="feat">
+        <div><span class="tag">visibility</span><h3>Live progress</h3></div>
+        <p>Tool calls stream into a status bubble as work happens — including subagent activity, indented under the agent that spawned it. You can watch a long job think.</p>
+      </div>
+      <div class="feat">
+        <div><span class="tag">input</span><h3>Voice notes and files</h3></div>
+        <p>Talk instead of typing — voice notes are transcribed with Whisper and run as prompts. Send a screenshot with “why does this look wrong?”, or drop in a PDF, CSV or log. Albums arrive as one request.</p>
+      </div>
+      <div class="feat">
+        <div><span class="tag">time</span><h3>Reminders that do things</h3></div>
+        <p>“Remind me at 8” works. So does “every morning, summarize yesterday's commits and tell me what's unfinished” — that one actually runs, in the background lane, and reports back.</p>
+      </div>
+      <div class="feat">
+        <div><span class="tag">control</span><h3>Your commands, your models</h3></div>
+        <p>Custom slash commands pass straight through. Switch models mid-conversation with <span class="inline">/model</span>, check context and usage with <span class="inline">/context</span>, kill a runaway with <span class="inline">/stop</span>.</p>
+      </div>
+      <div class="feat">
+        <div><span class="tag">uptime</span><h3>Self-healing</h3></div>
+        <p>The service manager restarts crashes. A two-strike watchdog catches the rarer case — a process that's alive but wedged — restarts it, verifies it recovered, and messages you what happened.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <p class="eyebrow">Install</p>
+    <h2>Three minutes, start to finish.</h2>
+    <p>You need <a href="https://claude.com/claude-code">Claude Code</a>, Node 18 or newer, and a Telegram account. macOS uses launchd; Linux uses systemd.</p>
+
+    <div class="steps">
+      <div class="step">
+        <div>
+          <h3>Clone and run the installer</h3>
+          <p>It checks your prerequisites first and tells you exactly what's missing. Add <span class="inline">--dry-run</span> to see everything it would do without touching a thing.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Make a bot, in Telegram</h3>
+          <p>The installer walks you through <a href="https://t.me/botfather">@BotFather</a> — send <span class="inline">/newbot</span>, paste the token back. Then message your new bot once so it can detect your chat ID automatically.</p>
+        </div>
+      </div>
+      <div class="step">
+        <div>
+          <h3>Send it <span class="inline">/help</span></h3>
+          <p>The service is already installed and running, and it starts again on every login. If you want the assistant to manage reminders and hand off long jobs on its own, paste the snippet from <span class="inline">templates/CLAUDE.md.example</span> into your CLAUDE.md.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="eyebrow" style="margin-top:3.5rem">Commands</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Send this</th><th>And it does</th></tr></thead>
+        <tbody>
+          <tr><td>any text</td><td>Runs in the chat lane — or the background lane if it looks long</td></tr>
+          <tr><td>/goal, /autopilot…</td><td>Any other slash command passes straight through to Claude Code</td></tr>
+          <tr><td>photo · file · voice</td><td>Saved locally and handed to Claude; your caption is the instruction</td></tr>
+          <tr><td>/new · /cd</td><td>Fresh session · switch working directory</td></tr>
+          <tr><td>/model · /context</td><td>Show or set the model · context size and token usage</td></tr>
+          <tr><td>/status · /logs</td><td>Both lanes' state · tail the daemon log</td></tr>
+          <tr><td>/stop · /restart</td><td>Kill the running task · restart the daemon remotely</td></tr>
+          <tr><td>/remind · /schedules</td><td>Daily, one-off or relative reminders — and scheduled tasks that run</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section id="security">
+  <div class="wrap">
+    <p class="eyebrow">Security</p>
+    <h2>Read this part properly.</h2>
+
+    <div class="warn">
+      <p><strong>This gives a Telegram chat the ability to run code on your machine.</strong>
+      That's the whole point of it, and it's worth understanding before you install.</p>
+    </div>
+
+    <ul class="sec-list">
+      <li><b>Single-owner by construction.</b> Every incoming message is checked against your chat ID before anything else happens — no reply, no download, no execution for anyone else. Strangers who find your bot get silence.</li>
+      <li><b>Your Telegram account is the key.</b> Anyone with access to your logged-in Telegram can run commands on your machine. Turn on two-step verification and review your active devices.</li>
+      <li><b>Permission mode is a real choice.</b> The default skips permission prompts, because headless runs can't answer them — without that, commands outside your allowlist are silently denied and tasks half-fail. <span class="inline">/yolo off</span> trades autonomy for friction.</li>
+      <li><b>The token stays local.</b> It lives in <span class="inline">config.json</span> (chmod 600, gitignored) and never leaves your machine. It can't make your computer execute anything on its own — the bridge only acts on messages from your chat.</li>
+      <li><b>Untrusted output is fenced.</b> Background worker results arrive inside explicit markers with instructions-inside-are-void framing, because a job that read a web page carries text you didn't write. Defense in depth, not a sandbox — the usual caveats for autonomous agents still apply.</li>
+      <li><b>Nothing else leaves.</b> No telemetry, no relay, no cloud component. Only the Telegram messages themselves — plus voice-note audio, if you turn on transcription.</li>
+    </ul>
+  </div>
+</section>
+
+<section class="cta">
+  <div class="wrap">
+    <h2>Put it in your pocket.</h2>
+    <p style="margin-inline:auto">Free, MIT-licensed, and yours to fork.</p>
+    <div class="cmd">
+      <div class="cmd-head">Install</div>
+      <div class="cmd-body">
+<code id="cmd-text-2"><span class="p">$</span> git clone https://github.com/zalogarcia/claude-telegram-bridge.git ~/claude-telegram-bridge
+<span class="p">$</span> cd ~/claude-telegram-bridge && ./install.sh</code>
+        <button class="copy" data-copy="#cmd-text-2" type="button">Copy</button>
+      </div>
+    </div>
+    <a class="btn" href="https://github.com/zalogarcia/claude-telegram-bridge">View the source on GitHub →</a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot-in">
+    <span>MIT licensed</span>
+    <span><a href="https://github.com/zalogarcia/claude-telegram-bridge">github.com/zalogarcia/claude-telegram-bridge</a></span>
+    <span class="sp">Not affiliated with Anthropic or Telegram.</span>
+  </div>
+</footer>
+
+<script>
+// Copy buttons
+document.querySelectorAll("button.copy").forEach(function (btn) {
+  btn.addEventListener("click", function () {
+    var el = document.querySelector(btn.dataset.copy);
+    var text = el.innerText.replace(/^\$ /gm, "");
+    navigator.clipboard.writeText(text).then(function () {
+      btn.textContent = "Copied";
+      btn.classList.add("done");
+      setTimeout(function () { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1800);
+    });
+  });
+});
+
+// Hero thread: play the product once, on load.
+var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+var thread = document.getElementById("thread");
+var secs = document.getElementById("secs");
+var steps = document.getElementById("steps");
+var t3 = document.getElementById("t3");
+
+if (reduce) {
+  thread.classList.add("played");
+  t3.style.opacity = 1;
+  secs.textContent = "11";
+  steps.textContent = "3";
+} else {
+  requestAnimationFrame(function () { thread.classList.add("played"); });
+  var s = 8, n = 0;
+  var tick = setInterval(function () {
+    s += 1;
+    secs.textContent = s;
+    if (s === 10) { t3.style.transition = "opacity .4s"; t3.style.opacity = 1; steps.textContent = "3"; }
+    if (++n >= 3) clearInterval(tick);
+  }, 420);
+}
+</script>
+
+</body>
+</html>
