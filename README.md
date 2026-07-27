@@ -204,6 +204,10 @@ journalctl --user -u com.claude-telegram-bridge -f    # Linux
 launchctl kickstart -k gui/$(id -u)/com.claude-telegram-bridge
 systemctl --user restart com.claude-telegram-bridge
 
+# restart without killing an in-flight run — waits for idle first
+# (use this after editing bridge.mjs while a task might be running)
+./safe-restart.sh
+
 # stop for real — the watchdog revives it otherwise
 touch .bridge-paused && launchctl bootout gui/$(id -u)/com.claude-telegram-bridge
 
