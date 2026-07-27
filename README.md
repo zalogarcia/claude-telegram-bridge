@@ -96,8 +96,8 @@ your reminders in plain English.
    bridge.mjs  ── service manager keeps it alive, watchdog catches wedges
     │
     ├── 🤖 chat lane      claude -p --resume <sessionId>     always answerable
-    └── 🌙 worker pool    bg1: --resume <bgSessionId>        long jobs + scheduled tasks
-                          bg2, bg3, … spawn on demand        fresh, self-contained
+    └── 🌙 worker pool    bg1, bg2, bg3, … spawn on demand   long jobs + scheduled tasks
+                          every worker: a fresh session      self-contained, then discarded
                                      │
                                      └── on completion → report goes to the CHAT lane,
                                          which summarizes it for you in plain words
@@ -109,10 +109,12 @@ minutes of silence. Long commands, anything prefixed `bg:`, scheduled tasks, and
 assistant-initiated handoffs run in their own Claude session instead. You keep
 chatting while they work.
 
-The background pool is **unbounded**: `bg1` keeps a persistent session, and every
-additional job that arrives while the pool is busy spawns its own worker (`bg2`,
-`bg3`, …) rather than queueing. Extra workers are ephemeral — they run one
-self-contained task and are cleaned up when they drain.
+The background pool is **unbounded**: every job that arrives while the pool is
+busy spawns its own worker (`bg2`, `bg3`, …) rather than queueing. Workers are
+**ephemeral** — each runs one self-contained task in a fresh session and is
+cleaned up when it drains, so a worker never resumes (or pays for) the context of
+an earlier job. They also get an hour-scale timeout rather than the chat lane's
+30-minute ceiling: the lane exists for work measured in hours.
 
 When a background job finishes, its output is delivered **to the chat session, not
 to you** — framed as untrusted worker data, capped at 6 consecutive reports so a
@@ -222,9 +224,10 @@ node test.mjs
 ```
 
 **`config.json` options:** `model`, `effort` (empty = your CLI defaults),
-`defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `timeoutMs` (default 30 min),
-`staleSec` (skip messages older than this — default 1h, so a sleeping laptop
-doesn't wake to a backlog). Every key can be overridden with a
+`defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `timeoutMs` (chat lane, default
+30 min), `bgTimeoutMs` (background workers, default 8h — that lane is for
+hour-scale jobs), `staleSec` (skip messages older than this — default 1h, so a
+sleeping laptop doesn't wake to a backlog). Every key can be overridden with a
 `BRIDGE_<UPPER_SNAKE>` environment variable.
 
 ## Caveats

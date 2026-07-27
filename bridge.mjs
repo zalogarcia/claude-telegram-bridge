@@ -62,7 +62,15 @@ const CLAUDE_BIN =
   ) ||
   'claude';
 const DEFAULT_CWD = conf('defaultCwd') || (existsSync(path.join(HOME, 'dev')) ? path.join(HOME, 'dev') : HOME);
+// Chat-lane ceiling: you are WAITING on this reply, so a wedged run must die
+// fast. Background workers are the opposite — the lane exists precisely for
+// jobs measured in hours (a video pipeline: transcribe → isolate → render →
+// assemble), and the shared 30m ceiling silently SIGTERM'd one at exactly
+// 30:01 with its output already built and typechecked (2026-07-27). The job
+// looked like it "failed"; it was killed. A background job's real guard is
+// /stop and your judgment, not a timer tuned for chat latency.
 const TASK_TIMEOUT_MS = Number(conf('timeoutMs', 30 * 60 * 1000));
+const BG_TASK_TIMEOUT_MS = Number(conf('bgTimeoutMs', 8 * 60 * 60 * 1000));
 const STALE_SEC = Number(conf('staleSec', 3600));
 // Telegram allows roughly 20 messages/min per chat, and an edit counts against
 // that. A 2500ms tick is 24 edits/min — over the ceiling on EVERY sustained run,
@@ -119,6 +127,15 @@ function chatState() {
   const st = (state.chats[CHAT_ID] ||= {});
   st.cwd ||= DEFAULT_CWD;
   st.yolo ??= DEFAULT_YOLO;
+  // Migration (2026-07-27): bg lanes are all ephemeral now. Drop the leftover
+  // persistent-bg keys so /status stops reporting a bg session that no lane
+  // will ever resume, and the dead context gauge doesn't linger at 84%.
+  if (st.bgSessionId || st.bgContextTokens || st.warnedBucket_bg !== undefined) {
+    delete st.bgSessionId;
+    delete st.bgContextTokens;
+    delete st.warnedBucket_bg;
+    saveState();
+  }
   return st;
 }
 
@@ -241,12 +258,19 @@ async function send(text, { markdown = true } = {}) {
 // its own busy slot, queue, and session id — two processes must never --resume
 // the same session.
 const LANES = {
-  main: { name: 'main', current: null, queue: [], sessionKey: 'sessionId', ctxKey: 'lastContextTokens', icon: '🤖', noun: 'Working' },
+  main: { name: 'main', current: null, queue: [], sessionKey: 'sessionId', ctxKey: 'lastContextTokens', icon: '🤖', noun: 'Working', timeoutMs: TASK_TIMEOUT_MS },
 };
 // Background lanes are a DYNAMIC POOL — as many parallel workers as there are
-// jobs. bg1 keeps the persistent background session (back-compat with the old
-// two-lane design); every additional worker (bg2, bg3, …) runs a fresh,
-// self-contained session and is garbage-collected when it drains.
+// jobs. EVERY worker, bg1 included, runs a FRESH self-contained session and is
+// garbage-collected when it drains.
+//
+// bg1 used to keep a persistent session (back-compat with the old two-lane
+// design). That was a slow leak: whenever bg1 was idle it took the next job and
+// resumed everything it had ever done, so a day of video work put it at 836k
+// tokens / 84% of the window — every later handoff paying for stale context it
+// could not use, and a long render one compaction away from losing its place.
+// Handoffs are self-contained by contract (the bg lane never sees the chat
+// conversation), so continuity bought nothing. Fresh every time, 2026-07-27.
 const bgLanes = [];
 let bgSeq = 0;
 function makeBgLane() {
@@ -258,10 +282,11 @@ function makeBgLane() {
     n,
     current: null,
     queue: [],
-    sessionKey: n === 1 ? 'bgSessionId' : null, // null = ephemeral, never resumed/persisted
-    ctxKey: n === 1 ? 'bgContextTokens' : null,
+    sessionKey: null, // null = ephemeral: never resumed, never persisted
+    ctxKey: null,
     icon: '🌙',
     noun: 'Background',
+    timeoutMs: BG_TASK_TIMEOUT_MS, // hours, not minutes — see BG_TASK_TIMEOUT_MS
   };
   bgLanes.push(lane);
   return lane;
@@ -551,14 +576,18 @@ function runClaude(rawText, lane = LANES.main) {
       return true;
     };
 
+    // Per-lane: chat dies at 30m, a background worker gets hours (see the
+    // constants). A lane without an explicit timeoutMs falls back to the chat
+    // ceiling — the conservative direction for anything new.
+    const laneTimeoutMs = lane.timeoutMs || TASK_TIMEOUT_MS;
     const killTimer = setTimeout(() => {
       if (!finished) {
-        const note = { kind: 'text', text: `⏱️ Timed out after ${Math.round(TASK_TIMEOUT_MS / 60000)} min — killing.` };
+        const note = { kind: 'text', text: `⏱️ Timed out after ${fmtElapsed(Math.round(laneTimeoutMs / 1000))} — killing.` };
         progress.push(note);
         toolLines.push(note);
         run.terminate();
       }
-    }, TASK_TIMEOUT_MS);
+    }, laneTimeoutMs);
 
     let rendering = false;
     const renderProgress = async () => {
@@ -1271,7 +1300,7 @@ Bridge commands:
 Any other /command goes straight to Claude Code — your custom commands work:
 /autopilot, /bug, /qa-loop, /plan, /brainstorm, /goal, …
 
-Unlimited background workers: long jobs (/goal, /autopilot, /qa-loop, /bug, /go-live), scheduled tasks and anything prefixed "bg:" each get a 🌙 worker — if one is busy, a new one spawns, so nothing ever queues behind background work and the 🤖 chat lane stays free. bg1 keeps a persistent session; extra workers are fresh and self-contained.
+Unlimited background workers: long jobs (/goal, /autopilot, /qa-loop, /bug, /go-live), scheduled tasks and anything prefixed "bg:" each get a 🌙 worker — if one is busy, a new one spawns, so nothing ever queues behind background work and the 🤖 chat lane stays free. Every worker is fresh and self-contained — nothing is resumed between jobs — and gets an hour-scale timeout instead of the chat lane's ${Math.round(TASK_TIMEOUT_MS / 60000)}-minute ceiling.
 
 Attachments: photos, videos, and files (≤20MB each) are saved to the bridge inbox and handed to Claude — a caption (or a text sent right after) is the instruction. Voice notes are transcribed (Whisper) and run as prompts — just talk. Messages sent while a task runs are steered INTO the running task, like typing mid-task in Claude Code (it folds them into the current work, or answers them right after); anything that can't be steered queues (max 5). /stop kills the task and discards the queue. Default model: ${DEFAULT_MODEL || 'CLI default'} (effort ${DEFAULT_EFFORT || 'CLI default'}).
 

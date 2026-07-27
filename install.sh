@@ -137,6 +137,7 @@ else
   "yolo": "true",
   "ownerName": "the owner",
   "timeoutMs": 1800000,
+  "bgTimeoutMs": 28800000,
   "staleSec": 3600
 }
 EOF

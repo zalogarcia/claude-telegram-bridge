@@ -11,6 +11,7 @@
   "ownerName": "the owner",
 
   "timeoutMs": 1800000,
+  "bgTimeoutMs": 28800000,
   "staleSec": 3600,
 
   "_comments": {
@@ -20,7 +21,8 @@
     "effort": "Empty = CLI default. Or 'low' | 'medium' | 'high' | 'xhigh'.",
     "yolo": "'true' passes --dangerously-skip-permissions (headless runs can't answer prompts). 'false' uses acceptEdits.",
     "ownerName": "What the assistant calls you when reporting on background work.",
-    "timeoutMs": "Kill a task after this long. Default 30 minutes.",
+    "timeoutMs": "Kill a CHAT-lane task after this long. Default 30 minutes — you're waiting on the reply.",
+    "bgTimeoutMs": "Kill a BACKGROUND worker after this long. Default 8 hours — that lane is for hour-scale jobs.",
     "staleSec": "Ignore messages older than this (e.g. queued while the machine slept). Default 1 hour.",
     "openaiApiKey": "Optional. For Whisper voice-note transcription. Usually better set as $OPENAI_API_KEY.",
     "env-override": "Any key can be overridden with BRIDGE_<UPPER_SNAKE_CASE>, e.g. BRIDGE_DEFAULT_CWD."

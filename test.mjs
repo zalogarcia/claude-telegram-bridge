@@ -325,6 +325,42 @@ t('fmtElapsed shows h/m/s at the right scales', () => {
   eq(M.fmtElapsed(7200), '2h');
 });
 
+// ---------- lane timeouts (source-level: the run loop isn't pure) ----------
+// A single shared 30m ceiling SIGTERM'd a background video-render job at
+// exactly 30:01 with its output already built (2026-07-27). The bg lane exists
+// for hour-scale work; these assertions fail if the kill timer ever goes back
+// to one constant for every lane.
+t('kill timer is per-lane, not the chat constant', () => {
+  ok(/const laneTimeoutMs = lane\.timeoutMs \|\| TASK_TIMEOUT_MS/.test(src), 'run loop must read lane.timeoutMs');
+  ok(/\}, laneTimeoutMs\);/.test(src), 'setTimeout must fire on the lane timeout');
+  ok(!/\}, TASK_TIMEOUT_MS\);/.test(src), 'kill timer must not use the chat constant directly');
+});
+
+t('background lanes get an hour-scale ceiling', () => {
+  ok(/timeoutMs: BG_TASK_TIMEOUT_MS/.test(src), 'bg lanes must carry the bg timeout');
+  ok(/timeoutMs: TASK_TIMEOUT_MS/.test(src), 'main lane must carry the chat timeout');
+  // Both ceilings go through conf() like every other tunable, so config.json
+  // and BRIDGE_BG_TIMEOUT_MS can override them.
+  const m = src.match(/const BG_TASK_TIMEOUT_MS = Number\(conf\('bgTimeoutMs', (\d+) \* 60 \* 60 \* 1000\)\);/);
+  ok(m, 'bg timeout must come from conf() and be declared in hours');
+  ok(Number(m[1]) >= 4, `bg ceiling must be >= 4h, got ${m?.[1]}h`);
+});
+
+// ---------- bg lanes are ephemeral (source-level) ----------
+// bg1 used to hold a persistent session; whenever it was idle it took the next
+// job and resumed everything it had ever done, reaching 836k tokens / 84% of the
+// window in one day. Handoffs are self-contained by contract, so continuity
+// bought nothing. These fail if a persistent bg session ever comes back.
+t('every bg lane is ephemeral', () => {
+  ok(/sessionKey: null, \/\/ null = ephemeral/.test(src), 'bg lanes must declare sessionKey null');
+  ok(!/sessionKey: n === 1 \? 'bgSessionId'/.test(src), 'bg1 must not resume a persistent session');
+  ok(!/ctxKey: n === 1 \? 'bgContextTokens'/.test(src), 'bg1 must not persist a context gauge');
+});
+
+t('stale persistent-bg keys are migrated away', () => {
+  ok(/delete st\.bgSessionId;\s*\n\s*delete st\.bgContextTokens;/.test(src), 'chatState must drop legacy bg keys');
+});
+
 // ---------- rate-limit budget (the fix this suite exists to protect) ----------
 t('the progress tick stays under Telegram’s ~20 edits/min per chat', () => {
   const m = src.match(/const EDIT_INTERVAL_MS = (\d+);/);
