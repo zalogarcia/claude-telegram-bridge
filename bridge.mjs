@@ -71,7 +71,11 @@ const STALE_SEC = Number(conf('staleSec', 3600));
 // which costs nothing, not by burning edits.
 const EDIT_INTERVAL_MS = 6000;
 const IDLE_EDIT_MS = 20000; // no new steps? at most one "still alive" edit this often
-const TYPING_INTERVAL_MS = 4000; // Telegram drops the typing indicator after ~5s
+// Telegram drops the indicator ~5s after each action, and SENDING a message
+// clears it immediately. 4000ms left almost no margin: one slow round trip, or
+// the progress bubble going out, and the dots visibly disappeared until the next
+// pulse. 3000ms keeps them lit continuously.
+const TYPING_INTERVAL_MS = 3000;
 const PROGRESS_TAIL = 3400;
 const TG_MSG_LIMIT = 4000;
 const ANNOUNCE_COOLDOWN_MS = 10 * 60 * 1000;
@@ -231,19 +235,54 @@ async function send(text, { markdown = true } = {}) {
 
 // ---------- claude runner ----------
 
-// Two independent lanes so a long job never makes M unreachable: `main` is the
-// conversational lane, `bg` runs long commands (/goal, /autopilot, …) and
-// scheduled tasks in their OWN Claude session. Each lane has its own busy slot,
-// queue, and session id — two processes must never --resume the same session.
+// Separate lanes so a long job never makes the chat unreachable: `main` is the
+// conversational lane, the background pool runs long commands (/goal,
+// /autopilot, …) and scheduled tasks in their OWN Claude sessions. Each lane has
+// its own busy slot, queue, and session id — two processes must never --resume
+// the same session.
 const LANES = {
   main: { name: 'main', current: null, queue: [], sessionKey: 'sessionId', ctxKey: 'lastContextTokens', icon: '🤖', noun: 'Working' },
-  bg: { name: 'bg', current: null, queue: [], sessionKey: 'bgSessionId', ctxKey: 'bgContextTokens', icon: '🌙', noun: 'Background' },
 };
+// Background lanes are a DYNAMIC POOL — as many parallel workers as there are
+// jobs. bg1 keeps the persistent background session (back-compat with the old
+// two-lane design); every additional worker (bg2, bg3, …) runs a fresh,
+// self-contained session and is garbage-collected when it drains.
+const bgLanes = [];
+let bgSeq = 0;
+function makeBgLane() {
+  bgSeq++;
+  const n = bgSeq;
+  const lane = {
+    name: n === 1 ? 'bg' : `bg${n}`,
+    isBg: true,
+    n,
+    current: null,
+    queue: [],
+    sessionKey: n === 1 ? 'bgSessionId' : null, // null = ephemeral, never resumed/persisted
+    ctxKey: n === 1 ? 'bgContextTokens' : null,
+    icon: '🌙',
+    noun: 'Background',
+  };
+  bgLanes.push(lane);
+  return lane;
+}
+// First idle worker, else spawn a new one — a busy pool never blocks a job.
+function getBgLane() {
+  return bgLanes.find((l) => !l.current && !l.queue.length && !l.finishing) || makeBgLane();
+}
+function gcBgLane(lane) {
+  if (lane.isBg && lane.n > 1 && !lane.current && !lane.queue.length && !lane.finishing) {
+    const i = bgLanes.indexOf(lane);
+    if (i >= 0) bgLanes.splice(i, 1);
+  }
+}
+const allLanes = () => [LANES.main, ...bgLanes];
+makeBgLane(); // bg1 exists from boot
 // Commands that historically run for many minutes — routed to bg automatically.
 const BG_COMMAND_RE = /^\/(goal|autopilot|qa-loop|bug|go-live|autopilot-merge)\b/i;
 const pendingOps = new Set(); // detached async work (e.g. /context) — selftest drains this
 let finishing = 0; // close handlers still running their async tail (selftest must not exit under them)
-const anyLaneBusy = () => finishing > 0 || Object.values(LANES).some((l) => l.current || l.queue.length);
+const anyLaneBusy = () => finishing > 0 || allLanes().some((l) => l.current || l.queue.length);
 
 // A static "Working in /home/you/dev" header looked identical on every run and
 // on every refresh, so a live run was indistinguishable from a frozen one. These
@@ -394,8 +433,8 @@ function runClaude(rawText, lane = LANES.main) {
   const run = { child: null, startedAt: Date.now(), stopped: false, prompt: rawText, terminate: null, lane };
   lane.current = run;
   return new Promise(async (resolve) => {
-    const args = ['-p', '--output-format', 'stream-json', '--verbose'];
-    if (st[lane.sessionKey]) args.push('--resume', st[lane.sessionKey]);
+    const args = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+    if (lane.sessionKey && st[lane.sessionKey]) args.push('--resume', st[lane.sessionKey]);
     // Unset model/effort = whatever the `claude` CLI itself defaults to.
     const model = st.model || DEFAULT_MODEL;
     if (model) args.push('--model', model);
@@ -418,7 +457,8 @@ function runClaude(rawText, lane = LANES.main) {
     let lastRendered = '';
     let lastRenderedBody = ''; // step list only — the header's timer is excluded on purpose
     let lastEditAt = 0;
-    let resultEvent = null;
+    let resultEvent = null; // last result event — session id / error bookkeeping
+    const resultTexts = []; // every turn's answer, in order (steering can create 2+ turns)
     // Context-window gauge. Must come from the LAST main-thread assistant message,
     // NOT resultEvent.usage — that one is cumulative over every API round trip in
     // the run, so cache_read re-counts the whole context once per tool call and the
@@ -481,8 +521,35 @@ function runClaude(rawText, lane = LANES.main) {
       }, 10_000);
       esc.unref?.();
     };
-    child.stdin.write(text);
-    child.stdin.end();
+    // Streaming-input mode: the prompt goes in as a stream-json user message
+    // and stdin STAYS OPEN, so messages arriving mid-task can be steered into
+    // the running child — native Claude Code behavior (probed: at a tool-step
+    // boundary the message joins the SAME turn; during a no-tool stretch it
+    // becomes its own follow-up turn — both delivered, see the resultTexts
+    // handling). The CLI only exits once stdin closes; that happens on the
+    // result event below.
+    child.stdin.on('error', () => {}); // EPIPE from a dead child must not crash the daemon
+    const userMsg = (t) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: t }] } }) + '\n';
+    child.stdin.write(userMsg(text));
+    run.steer = (t) => {
+      // No steering once the result is in (a write now would start a whole new
+      // turn on a closing process), after /new//cd bumped the generation (the
+      // user asked for a fresh chat — don't feed their message to the old one),
+      // or into a compact run (its result IS the handoff summary — a steered
+      // reply would get archived as the summary and wreck the new chat).
+      // Callers fall back to the queue when this returns false.
+      if (finished || run.stopped || resultEvent || (st[genKey] || 0) !== startGen || !child.stdin.writable) return false;
+      if (rawText.startsWith(COMPACT_MARKER)) return false;
+      try {
+        child.stdin.write(userMsg(t));
+      } catch {
+        return false;
+      }
+      const note = { kind: 'text', text: `📨 steered in: ${clip(t.replace(/\s+/g, ' '), 90)}` };
+      progress.push(note);
+      toolLines.push(note);
+      return true;
+    };
 
     const killTimer = setTimeout(() => {
       if (!finished) {
@@ -515,7 +582,7 @@ function runClaude(rawText, lane = LANES.main) {
       // and tying it to ticks meant the rate drifted with the render cadence and
       // jumped after a rate-limit pause.
       const word = thinkingWord(wordSeed + Math.floor(elapsed / WORD_HOLD_SEC));
-      const header = `<b>${lane.icon} ${word}…</b> · ${elapsed}s${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
+      const header = `<b>${lane.icon} ${word}…</b> · ${fmtElapsed(elapsed)}${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
       const body = quoteBlock(renderTail(recent, true, PROGRESS_TAIL));
       const htmlOut = `${header}${body}`.slice(0, TG_MSG_LIMIT);
       // The old dedup compared the WHOLE message, but the header carries a
@@ -527,7 +594,7 @@ function runClaude(rawText, lane = LANES.main) {
       lastEditAt = Date.now();
       lastRendered = htmlOut;
       await editProgress(progressMsgId, htmlOut, () =>
-        `${lane.icon} ${word}… (${elapsed}s · ${steps} steps)\n${renderTail(recent, false, PROGRESS_TAIL)}`.slice(
+        `${lane.icon} ${word}… (${fmtElapsed(elapsed)} · ${steps} steps)\n${renderTail(recent, false, PROGRESS_TAIL)}`.slice(
           0,
           TG_MSG_LIMIT,
         ),
@@ -541,9 +608,15 @@ function runClaude(rawText, lane = LANES.main) {
     // (retry429:false) and never let a failure surface.
     // Chat lane only: the bg lane deliberately leaves the chat usable, so
     // claiming "typing" while the user is free to talk would be a lie.
+    let typingFails = 0;
     const sendTyping = () => {
       if (!liveProgress) return;
-      tg('sendChatAction', { chat_id: CHAT_ID, action: 'typing' }, 0, { retry429: false }).catch(() => {});
+      tg('sendChatAction', { chat_id: CHAT_ID, action: 'typing' }, 0, { retry429: false }).catch((e) => {
+        // Swallowing these entirely meant "the dots keep vanishing" was
+        // undiagnosable. Still never retried — just surface a pattern of
+        // failures once, without spamming the log every 3s.
+        if (++typingFails === 3) console.error(`[bridge] typing indicator failing (${e.message})`);
+      });
     };
     sendTyping(); // immediately, so it shows before the first tool call lands
     const typingTimer = liveProgress ? setInterval(sendTyping, TYPING_INTERVAL_MS) : null;
@@ -569,10 +642,24 @@ function runClaude(rawText, lane = LANES.main) {
             const entry = toolEntry(block, isSubagent);
             progress.push(entry);
             toolLines.push(entry);
+            // Live gauge for /status — bg lanes get no live-updating bubble,
+            // so this is where their current activity stays visible.
+            run.steps = toolLines.length;
+            run.lastAct = renderEntry(entry, false).replace(/^\s*↳\s*/, '');
           }
         }
       } else if (ev.type === 'result') {
         resultEvent = ev;
+        // The CLI only injects a steer at a step boundary — during a no-tool
+        // stretch it becomes its OWN turn with its own result event (probed
+        // live: essay task + steered "what is 2+2" → 2 results). Collect every
+        // answer; keeping only the last would silently replace the original
+        // task's answer with the reply to the follow-up.
+        if (typeof ev.result === 'string' && ev.result.trim()) resultTexts.push(ev.result);
+        // Streaming-input mode keeps the process alive waiting for more stdin —
+        // closing it here is what ends the run. A steer racing the close is
+        // already buffered CLI-side and runs as one more turn before exit.
+        child.stdin.end();
       }
     });
 
@@ -608,32 +695,54 @@ function runClaude(rawText, lane = LANES.main) {
       if (SELFTEST && resultEvent?.result) console.log('[selftest result]', String(resultEvent.result).slice(0, 600));
 
       // Persist the session only if /new or /cd didn't reset it mid-run —
-      // otherwise we'd resurrect the context the user just cleared.
-      if (resultEvent?.session_id && (st[genKey] || 0) === startGen) {
+      // otherwise we'd resurrect the context the user just cleared. The SAME
+      // guard must cover the gauge write and the archive upsert below: after a
+      // mid-run /resume, this close belongs to the OLD chat, and stamping the
+      // freshly resumed chat's archive entry with the old run's cwd/tokens
+      // corrupts /chats and the cwd a later /resume restores.
+      const genOk = (st[genKey] || 0) === startGen;
+      if (lane.sessionKey && resultEvent?.session_id && genOk) {
         st[lane.sessionKey] = resultEvent.session_id;
       }
       if (run.model) st.lastModel = run.model;
-      if (lastUsage) {
+      if (lastUsage && lane.ctxKey && genOk) {
         const u = lastUsage;
         // One message's input + cache reads + cache writes = what the model actually
         // had in front of it on that call, i.e. current context depth.
         st[lane.ctxKey] =
           (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
       }
+      // Chat registry: every main-lane session lands in the archive so it can
+      // be listed (/chats), named (/rename) and resumed (/resume) later.
+      if (lane === LANES.main && st.sessionId && genOk) {
+        st.archive = archiveUpsert(st.archive, st.sessionId, {
+          cwd,
+          at: Date.now(),
+          tokens: st.lastContextTokens || 0,
+        });
+      }
       // Warn once per threshold as the session fills its context window.
-      const win = modelWindow(run.model || st.model || DEFAULT_MODEL);
-      const pct = Math.round(((st[lane.ctxKey] || 0) / win) * 100);
-      const bucketKey = `warnedBucket_${lane.name}`;
-      const bucket = pct >= 90 ? 90 : pct >= 75 ? 75 : pct >= 60 ? 60 : 0;
-      if (bucket !== (st[bucketKey] || 0)) {
-        st[bucketKey] = bucket;
-        if (bucket)
-          await send(
-            `⚠️ ${lane.name === 'bg' ? 'Background' : 'Chat'} session context at ${pct}% of ${fmtTokens(win)} — /new${
-              lane.name === 'bg' ? ' bg' : ''
-            } starts fresh when convenient.`,
-            { markdown: false },
-          ).catch(() => {});
+      // Ephemeral workers (no persistent session) skip the gauge entirely.
+      // Fallback order mirrors how the run was launched (st.model first — a
+      // /model override must beat a stale lastModel from the previous run).
+      // st.lastModel still matters: with no configured model, a run that dies
+      // before any assistant event would otherwise price the window off an
+      // empty string (200k) and fire a false "context at 125%" warning.
+      const win = modelWindow(run.model || st.model || st.lastModel || DEFAULT_MODEL);
+      if (lane.ctxKey && genOk) {
+        const pct = Math.round(((st[lane.ctxKey] || 0) / win) * 100);
+        const bucketKey = `warnedBucket_${lane.name}`;
+        const bucket = pct >= 90 ? 90 : pct >= 75 ? 75 : pct >= 60 ? 60 : 0;
+        if (bucket !== (st[bucketKey] || 0)) {
+          st[bucketKey] = bucket;
+          if (bucket)
+            await send(
+              `⚠️ ${lane.name === 'bg' ? 'Background' : 'Chat'} session context at ${pct}% of ${fmtTokens(win)} — /new${
+                lane.name === 'bg' ? ' bg' : ''
+              } starts fresh when convenient.`,
+              { markdown: false },
+            ).catch(() => {});
+        }
       }
       saveState();
 
@@ -642,7 +751,7 @@ function runClaude(rawText, lane = LANES.main) {
       if (progressMsgId != null) {
         const head = wasStopped ? '🛑 Stopped' : resultEvent && !resultEvent.is_error ? '✅ Done' : '❌ Error';
         const steps = toolLines.length;
-        const meta = `${elapsed}s${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
+        const meta = `${fmtElapsed(elapsed)}${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
         const htmlBody = renderTail(toolLines, true, PROGRESS_TAIL);
         await editProgress(
           progressMsgId,
@@ -651,15 +760,50 @@ function runClaude(rawText, lane = LANES.main) {
         );
       }
 
-      const isBg = lane === LANES.bg;
+      const isBg = !!lane.isBg;
+      const isCompact = lane === LANES.main && rawText.startsWith(COMPACT_MARKER);
       if (wasStopped) {
         await send('🛑 Task stopped.').catch(() => {});
-      } else if (resultEvent && typeof resultEvent.result === 'string' && resultEvent.result.trim()) {
+      } else if (isCompact && resultTexts.length && !genOk) {
+        // /new or /resume landed while the summary was being written — the
+        // branch below would act on the WRONG chat (delete the one the user
+        // just switched to, resurrect the one they cleared). Discard instead;
+        // both chats stay in the archive. A dedicated arm, not && genOk on the
+        // next one: falling through would dump the whole summary as a bubble.
+        await send('📦 Compaction discarded — the chat was switched or cleared while it ran.', {
+          markdown: false,
+        }).catch(() => {});
+      } else if (isCompact && resultTexts.length) {
+        // /compact phase 2: the summary is in hand — archive the old chat,
+        // start a fresh session primed with it. The summary itself is not
+        // sent as a bubble (it would be a wall of text).
+        const prev = st.sessionId;
+        if (prev) st.archive = archiveUpsert(st.archive, prev, { at: Date.now() });
+        delete st.sessionId;
+        delete st.warnedBucket_main;
+        st.gen_main = (st.gen_main || 0) + 1;
+        saveState();
+        await send(
+          `📦 Compacted. Old chat archived (${prev ? prev.slice(0, 8) : '?'}) — /rename or /resume it anytime.\n🆕 Starting a fresh chat primed with the summary…`,
+          { markdown: false },
+        ).catch(() => {});
+        dispatchPrompt(
+          // resultTexts[0]: compact runs are steer-proof so there is only one
+          // turn, but if anything ever slips through, the FIRST answer is the
+          // summary — later ones would be replies to whatever slipped in.
+          `[Session handoff — the summary below is the compacted context of your previous chat with ${OWNER_NAME}. It is your starting context. Acknowledge in ONE short line (what you're in the middle of), then wait for the next message.]\n\n${resultTexts[0]}`,
+          LANES.main,
+          { priority: true },
+        );
+      } else if (resultTexts.length) {
         if (isBg) {
-          recordBgResult(rawText, resultEvent.result);
-          handBackToChat(rawText, resultEvent.result, 'finished');
+          const answer = resultTexts.join('\n\n');
+          recordBgResult(rawText, answer);
+          handBackToChat(rawText, answer, 'finished');
         } else {
-          await sendResult(resultEvent.result).catch(() => {});
+          // One bubble per turn — a steer that became its own turn produced two
+          // answers, and BOTH belong to the user.
+          for (const t of resultTexts) await sendResult(t).catch(() => {});
         }
       } else if (resultEvent?.is_error || code !== 0) {
         const detail = stderrTail.trim() || resultEvent?.subtype || `exit code ${code}`;
@@ -678,9 +822,71 @@ function runClaude(rawText, lane = LANES.main) {
       if (lane.finishing) lane.finishing--;
       resolve();
       drainQueue(lane);
+      gcBgLane(lane);
     });
   });
 }
+
+// ---------- chat registry (pure helpers; unit-tested in test.mjs) ----------
+
+// Upsert a session into the per-chat archive map, keeping the most recent
+// ARCHIVE_CAP entries (named chats are evicted last).
+const ARCHIVE_CAP = 60;
+function archiveUpsert(archive, id, patch) {
+  const a = { ...(archive || {}) };
+  a[id] = { ...(a[id] || {}), ...patch };
+  const ids = Object.keys(a);
+  if (ids.length > ARCHIVE_CAP) {
+    const evictable = ids
+      .sort((x, y) => (a[x].name ? 1 : 0) - (a[y].name ? 1 : 0) || (a[x].at || 0) - (a[y].at || 0));
+    for (const ev of evictable.slice(0, ids.length - ARCHIVE_CAP)) delete a[ev];
+  }
+  return a;
+}
+
+// Resolve a user reference (exact name, unique name prefix, or unique id
+// prefix ≥4 chars) to a session id. Returns {id} or {error}.
+function matchArchive(archive, ref) {
+  const a = archive || {};
+  const q = String(ref || '').trim().toLowerCase();
+  if (!q) return { error: 'empty' };
+  const entries = Object.entries(a);
+  const byExact = entries.filter(([, e]) => (e.name || '').toLowerCase() === q);
+  if (byExact.length === 1) return { id: byExact[0][0] };
+  const byName = entries.filter(([, e]) => (e.name || '').toLowerCase().startsWith(q));
+  if (byName.length === 1) return { id: byName[0][0] };
+  if (byName.length > 1) return { error: `ambiguous name "${ref}" (${byName.length} matches)` };
+  if (q.length >= 4) {
+    const byId = entries.filter(([id]) => id.toLowerCase().startsWith(q));
+    if (byId.length === 1) return { id: byId[0][0] };
+    if (byId.length > 1) return { error: `ambiguous id prefix "${ref}"` };
+  }
+  return { error: `no chat named or matching "${ref}" — see /chats` };
+}
+
+// Elapsed run time for humans: 45s · 6m 19s · 1h 12m.
+function fmtElapsed(sec) {
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h}h ${rm}m` : `${h}h`;
+}
+
+function fmtAge(ms) {
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.round(h / 24)}d`;
+}
+
+const COMPACT_MARKER = '[[BRIDGE-COMPACT]]';
+const COMPACT_PROMPT =
+  COMPACT_MARKER +
+  ' Produce a compaction summary of this entire conversation for a successor session that will have NO other context. Include: who you are working with and standing instructions; every active project with its exact state and file paths; key decisions made (with the reasoning that still matters); open tasks and what happens next; anything you were asked to remember. Write it as dense prose + bullet lists. Output ONLY the summary — no preamble, no sign-off.';
 
 // ---------- commands ----------
 
@@ -701,6 +907,10 @@ const RESERVED_COMMANDS = new Set([
   '/remind',
   '/schedules',
   '/unschedule',
+  '/rename',
+  '/resume',
+  '/chats',
+  '/compact',
 ]);
 
 // ---------- schedules ----------
@@ -710,9 +920,9 @@ const RESERVED_COMMANDS = new Set([
 
 const SCHEDULES_FILE = path.join(SCRIPT_DIR, 'schedules.json');
 const BG_QUEUE_FILE = path.join(SCRIPT_DIR, 'bg-queue.json'); // handoff drop-box: `bg.mjs` writes, daemon drains
-const BG_RESULTS_FILE = path.join(SCRIPT_DIR, 'bg-results.jsonl'); // background outcomes M can read back
+const BG_RESULTS_FILE = path.join(SCRIPT_DIR, 'bg-results.jsonl'); // background outcomes the chat lane can read back
 
-// The bg lane is a separate session, so its result would otherwise be invisible
+// A bg lane is a separate session, so its result would otherwise be invisible
 // to the chat lane. Record it, and hand the chat lane a note on its next turn.
 function recordBgResult(prompt, result) {
   const entry = { ts: new Date().toISOString(), prompt: prompt.slice(0, 300), result: (result || '').slice(0, 4000) };
@@ -730,12 +940,15 @@ function recordBgResult(prompt, result) {
   }
 }
 
-// Background output goes to M (the chat lane), not straight to Telegram — she
-// decides whether more work is needed or a short update to the owner is enough.
+// Background output goes to the chat lane, not straight to Telegram — the
+// assistant decides whether more work is needed or a short update is enough.
 // Consecutive worker reports with no user message in between. Bounds the
 // report → re-handoff → report loop a deterministic failure would otherwise spin.
 let handbackStreak = 0;
-const HANDBACK_STREAK_MAX = 3;
+// Was 3 when there was a single bg lane. With unlimited parallel workers,
+// several legit reports can land back-to-back with no user message between
+// them — the guard is for infinite report→re-handoff LOOPS, not bursts.
+const HANDBACK_STREAK_MAX = 6;
 
 function handBackToChat(task, output, status) {
   handbackStreak++;
@@ -786,7 +999,7 @@ function drainBgHandoff() {
     const text = typeof it === 'string' ? it : it?.text;
     if (!text) continue;
     send(`🌙 Handed to the background lane: ${text.slice(0, 120)}`, { markdown: false }).catch(() => {});
-    dispatchPrompt(text, LANES.bg, { priority: true }); // already claimed out of the file — must not be dropped
+    dispatchPrompt(text, getBgLane(), { priority: true }); // already claimed out of the file — must not be dropped
   }
 }
 
@@ -857,8 +1070,10 @@ function checkSchedules() {
       changed = true;
       if (s.run) {
         send(`⏰ #${s.id} starting scheduled task: ${s.text.slice(0, 100)}`, { markdown: false }).catch(() => {});
-        // scheduled work must never block chat, and must not be dropped on a full queue
-        dispatchPrompt(s.text, LANES.bg, { priority: true });
+        // scheduled work must never block chat, and must not be dropped on a
+        // full queue. getBgLane(), not the old LANES.bg — that key died in the
+        // lane-pool refactor and the undefined fell through to the CHAT lane.
+        dispatchPrompt(s.text, getBgLane(), { priority: true });
       } else {
         send(`⏰ Reminder: ${s.text}`, { markdown: false }).catch(() => {});
       }
@@ -1006,8 +1221,12 @@ async function gatherContext(st) {
 // Telegram allows only [a-z0-9_] in command names — hyphenated CC commands are
 // registered with underscores and translated back before passthrough.
 const BOT_COMMANDS = [
-  { command: 'new', description: 'Fresh session (clear context)' },
-  { command: 'status', description: 'Bridge status: cwd, session, model, task' },
+  { command: 'new', description: 'Fresh chat (old one stays resumable)' },
+  { command: 'chats', description: 'List recent chats (name + id)' },
+  { command: 'rename', description: 'Name the current chat' },
+  { command: 'resume', description: 'Switch to a saved chat' },
+  { command: 'compact', description: 'Summarize -> fresh chat with summary' },
+  { command: 'status', description: 'Live status: chat + every worker, right now' },
   { command: 'context', description: 'Context size + 5h block + weekly usage' },
   { command: 'model', description: 'Show or set the model' },
   { command: 'cd', description: 'Set working directory (resets session)' },
@@ -1033,11 +1252,14 @@ const HELP = `Claude Code bridge on ${hostname()}
 Send any text → runs it in your Claude Code session (streams progress, replies with the result).
 
 Bridge commands:
-/new [bg|all] — fresh session (chat lane by default)
+/new [bg|all] — fresh chat (the old one is archived, not deleted)
+/chats — last 30 chats by name + id · /rename <name> — name the current chat
+/resume <name|id> — switch back to any archived chat
+/compact — summarize this chat, then start fresh with the summary injected
 /cd <path> — set working directory (see /status for current)
 /model — show model · /model <name> — set it (fable, opus, sonnet, haiku, or full id; "default" resets)
 /context — session context size + 5h-block and weekly usage
-/status — cwd, session, model, mode
+/status — live status: cwd, session, model + what every lane is doing right now
 /stop [bg|all] — kill the running task (chat lane by default)
 /restart — restart the bridge daemon itself (if something feels stuck)
 /logs — last lines of the daemon log
@@ -1049,11 +1271,11 @@ Bridge commands:
 Any other /command goes straight to Claude Code — your custom commands work:
 /autopilot, /bug, /qa-loop, /plan, /brainstorm, /goal, …
 
-Two lanes: long jobs (/goal, /autopilot, /qa-loop, /bug, /go-live) and scheduled tasks run in a 🌙 background session so the 🤖 chat lane stays free — you can keep talking while they work. Prefix anything with "bg:" to force it there.
+Unlimited background workers: long jobs (/goal, /autopilot, /qa-loop, /bug, /go-live), scheduled tasks and anything prefixed "bg:" each get a 🌙 worker — if one is busy, a new one spawns, so nothing ever queues behind background work and the 🤖 chat lane stays free. bg1 keeps a persistent session; extra workers are fresh and self-contained.
 
-Attachments: photos, videos, and files (≤20MB each) are saved to the bridge inbox and handed to Claude — a caption (or a text sent right after) is the instruction. Voice notes are transcribed (Whisper) and run as prompts — just talk. Messages sent while a task runs queue up (max 5) and run in order; /stop discards the queue. Default model: ${DEFAULT_MODEL} (effort ${DEFAULT_EFFORT}).
+Attachments: photos, videos, and files (≤20MB each) are saved to the bridge inbox and handed to Claude — a caption (or a text sent right after) is the instruction. Voice notes are transcribed (Whisper) and run as prompts — just talk. Messages sent while a task runs are steered INTO the running task, like typing mid-task in Claude Code (it folds them into the current work, or answers them right after); anything that can't be steered queues (max 5). /stop kills the task and discards the queue. Default model: ${DEFAULT_MODEL || 'CLI default'} (effort ${DEFAULT_EFFORT || 'CLI default'}).
 
-Notes: one task at a time · messages older than ${Math.round(STALE_SEC / 60)} min are skipped · only works while the Mac is awake.`;
+Notes: one chat-lane task at a time (background workers unlimited) · messages older than ${Math.round(STALE_SEC / 60)} min are skipped · only works while this machine is awake.`;
 
 function expandPath(p) {
   if (p === '~') return HOME;
@@ -1075,21 +1297,127 @@ async function handleCommand(text) {
     case '/new': {
       // /new → chat lane · /new bg → background lane · /new all → both
       const which = arg.trim().toLowerCase();
+      const prevMain = st.sessionId;
       if (which !== 'bg') {
         delete st.sessionId;
         delete st.warnedBucket_main;
+        delete st.lastContextTokens; // /status would show the dead chat's ctx %
         st.gen_main = (st.gen_main || 0) + 1;
       }
       if (which === 'bg' || which === 'all') {
         delete st.bgSessionId;
         delete st.warnedBucket_bg;
+        delete st.bgContextTokens;
         st.gen_bg = (st.gen_bg || 0) + 1;
       }
       saveState();
+      const archNote =
+        which !== 'bg' && prevMain
+          ? `\nOld chat archived (${prevMain.slice(0, 8)}) — /rename or /resume it anytime.`
+          : '';
       await send(
-        `🆕 ${which === 'all' ? 'Both sessions' : which === 'bg' ? 'Background session' : 'Chat session'} cleared.`,
+        `🆕 ${which === 'all' ? 'Both sessions' : which === 'bg' ? 'Background session' : 'Chat session'} cleared.${archNote}`,
         { markdown: false },
       );
+      return;
+    }
+    case '/rename': {
+      const name = arg.trim();
+      if (!name) {
+        await send('Usage: /rename <name> — names the current chat so you can /resume it later.', { markdown: false });
+        return;
+      }
+      if (!st.sessionId) {
+        await send('No active chat yet — send a message first, then /rename it.', { markdown: false });
+        return;
+      }
+      const clash = Object.entries(st.archive || {}).find(
+        ([id, e]) => (e.name || '').toLowerCase() === name.toLowerCase() && id !== st.sessionId,
+      );
+      if (clash) {
+        await send(
+          `❌ Another chat is already named "${name}" (${clash[0].slice(0, 8)}) — pick a different name or /resume that one.`,
+          { markdown: false },
+        );
+        return;
+      }
+      st.archive = archiveUpsert(st.archive, st.sessionId, {
+        name,
+        cwd: st.cwd,
+        at: Date.now(),
+        tokens: st.lastContextTokens || 0,
+      });
+      saveState();
+      await send(`✏️ This chat is now "${name}" (${st.sessionId.slice(0, 8)}). Resume anytime: /resume ${name}`, {
+        markdown: false,
+      });
+      return;
+    }
+    case '/chats': {
+      const entries = Object.entries(st.archive || {})
+        .sort((a, b) => (b[1].at || 0) - (a[1].at || 0))
+        .slice(0, 30);
+      if (!entries.length) {
+        await send('No chats recorded yet — they get archived as you work.', { markdown: false });
+        return;
+      }
+      const lines = entries.map(([id, e]) => {
+        const cur = id === st.sessionId ? '⭐ ' : '• ';
+        const nm = e.name ? `${e.name}` : '(unnamed)';
+        const dir = e.cwd ? prettyPath(e.cwd) : '';
+        const tok = e.tokens ? ` · ${fmtTokens(e.tokens)}` : '';
+        return `${cur}${nm} — ${id.slice(0, 8)} · ${fmtAge(Date.now() - (e.at || 0))} ago · ${dir}${tok}`;
+      });
+      await send(
+        `💬 Recent chats (${entries.length}):\n${lines.join('\n')}\n\nSwitch: /resume <name or id prefix> · name one: /rename <name>`,
+        { markdown: false },
+      );
+      return;
+    }
+    case '/resume': {
+      const ref = arg.trim();
+      if (!ref) {
+        await send('Usage: /resume <name or id prefix> — see /chats for the list.', { markdown: false });
+        return;
+      }
+      const m = matchArchive(st.archive, ref);
+      if (m.error) {
+        await send(`❌ ${m.error}`, { markdown: false });
+        return;
+      }
+      if (m.id === st.sessionId) {
+        await send('Already on that chat.', { markdown: false });
+        return;
+      }
+      const entry = st.archive[m.id];
+      // archive whatever we are leaving (its entry already exists from run close)
+      st.sessionId = m.id;
+      st.gen_main = (st.gen_main || 0) + 1; // an in-flight run must not overwrite the switch
+      delete st.warnedBucket_main;
+      st.lastContextTokens = entry.tokens || 0;
+      const cwdNote = entry.cwd && entry.cwd !== st.cwd ? `\n📁 cwd → ${entry.cwd} (sessions are per-project)` : '';
+      if (entry.cwd) st.cwd = entry.cwd;
+      saveState();
+      await send(
+        `⏪ Resumed "${entry.name || m.id.slice(0, 8)}" (${m.id.slice(0, 8)}).${cwdNote}\nNext message continues that conversation.`,
+        { markdown: false },
+      );
+      return;
+    }
+    case '/compact': {
+      if (!st.sessionId) {
+        await send('Nothing to compact — this chat is fresh.', { markdown: false });
+        return;
+      }
+      if (LANES.main.current) {
+        await send('⏳ Chat lane is busy — compaction queued behind the current task.', { markdown: false });
+      } else {
+        await send('📦 Compacting — asking the current chat for a handoff summary…', { markdown: false });
+      }
+      // priority: the queue path, NEVER the steer path — steered into a running
+      // task, the summary would come back under that task's rawText and the
+      // COMPACT_MARKER check in the close handler would never fire.
+      dispatchPrompt(COMPACT_PROMPT, LANES.main, { priority: true });
       return;
     }
     case '/cd': {
@@ -1110,6 +1438,12 @@ async function handleCommand(text) {
       // sessions are per-project in Claude Code; resuming across cwds misbehaves
       delete st.sessionId;
       delete st.bgSessionId;
+      // ...and the context gauges/buckets belong to those dead sessions — the
+      // close handler no longer re-stamps them (genOk), so clear them here.
+      delete st.warnedBucket_main;
+      delete st.warnedBucket_bg;
+      delete st.lastContextTokens;
+      delete st.bgContextTokens;
       st.gen_main = (st.gen_main || 0) + 1; // cwd change invalidates BOTH lanes
       st.gen_bg = (st.gen_bg || 0) + 1;
       saveState();
@@ -1117,31 +1451,45 @@ async function handleCommand(text) {
       return;
     }
     case '/status': {
-      const laneStatus = (l) =>
-        l.current
-          ? `${Math.round((Date.now() - l.current.startedAt) / 1000)}s: "${l.current.prompt.slice(0, 60)}"${
-              l.queue.length ? ` (+${l.queue.length} queued)` : ''
-            }`
-          : // `current` is cleared before the close handler's async tail (progress
-            // edit + result send + handback), and the queue only drains after it.
-            // Reporting "idle (+N queued)" during that window reads as a stuck
-            // queue when it's really mid-handoff — anyLaneBusy() already counts it.
-            l.finishing
-            ? `wrapping up (+${l.queue.length} queued)`
-            : l.queue.length
-              ? `idle (+${l.queue.length} queued)`
-              : 'idle';
-      const busy = `${LANES.main.icon} chat ${laneStatus(LANES.main)} · ${LANES.bg.icon} bg ${laneStatus(LANES.bg)}`;
+      const now = Date.now();
+      const laneTitle = (l) => (l.isBg ? `🌙 ${l.name}` : '🤖 Chat');
+      const laneBlock = (l) => {
+        if (l.current) {
+          const r = l.current;
+          const el = fmtElapsed(Math.round((now - r.startedAt) / 1000));
+          const steps = r.steps ? ` · ${r.steps} step${r.steps > 1 ? 's' : ''}` : '';
+          const out = [
+            `**${laneTitle(l)}** — 🟢 running · ${el}${steps}`,
+            `“${clip(r.prompt.replace(/\s+/g, ' '), 120)}”`,
+          ];
+          if (r.lastAct) out.push(`↳ ${r.lastAct}`);
+          if (l.queue.length) out.push(`📥 ${l.queue.length} queued`);
+          return out.join('\n');
+        }
+        // `current` clears before the close handler's async tail (result send +
+        // handback) and the queue only drains after it — "wrapping up" keeps
+        // that window from reading as a stuck queue.
+        if (l.finishing) return `**${laneTitle(l)}** — 🟡 wrapping up${l.queue.length ? ` · ${l.queue.length} queued` : ''}`;
+        if (l.queue.length) return `**${laneTitle(l)}** — 📥 ${l.queue.length} queued`;
+        return `**${laneTitle(l)}** — ⚪ idle`;
+      };
+      const activeBg = bgLanes.filter((l) => l.current || l.queue.length || l.finishing);
+      const win = modelWindow(st.lastModel || st.model || DEFAULT_MODEL);
+      const pct = st.lastContextTokens
+        ? ` · ctx ${Math.min(100, Math.round((st.lastContextTokens / win) * 100))}%`
+        : '';
       await send(
         [
-          `📍 ${hostname()}`,
-          `cwd: ${st.cwd}`,
-          `session: ${st.sessionId ? st.sessionId.slice(0, 8) + '…' : 'none (fresh)'}${st.bgSessionId ? ` · bg ${st.bgSessionId.slice(0, 8)}…` : ''}`,
-          `model: ${st.model || `${DEFAULT_MODEL} (default)`}${st.lastModel ? ` (last used: ${st.lastModel})` : ''}`,
-          `mode: ${st.yolo ? 'YOLO (skip permissions)' : 'acceptEdits'}`,
-          `state: ${busy}`,
+          `**📍 Bridge on ${hostname().replace(/\.local$/, '')}**`,
+          `📁 ${st.cwd.replace(HOME, '~')}`,
+          `🧠 ${st.model || DEFAULT_MODEL || 'CLI default'} · ${st.yolo ? 'YOLO' : 'acceptEdits'}`,
+          `💬 chat ${st.sessionId ? st.sessionId.slice(0, 8) : 'fresh'}${pct}${st.bgSessionId ? ` · bg ${st.bgSessionId.slice(0, 8)}` : ''}`,
+          '',
+          laneBlock(LANES.main),
+          ...(activeBg.length
+            ? activeBg.flatMap((l) => ['', laneBlock(l)])
+            : ['', '**🌙 Background** — ⚪ idle (workers spawn on demand)']),
         ].join('\n'),
-        { markdown: false },
       );
       return;
     }
@@ -1149,7 +1497,7 @@ async function handleCommand(text) {
       if (!arg) {
         await send(
           [
-            `model: ${st.model || `${DEFAULT_MODEL} (default)`}`,
+            `model: ${st.model || `${DEFAULT_MODEL || 'CLI default'} (default)`}`,
             `last run used: ${st.lastModel || 'n/a'}`,
             '',
             'Set: /model fable | opus | sonnet | haiku | <full-id> · /model default resets',
@@ -1162,7 +1510,7 @@ async function handleCommand(text) {
       if (m === 'default' || m === 'reset') {
         delete st.model;
         saveState();
-        await send(`✅ Model override cleared — back to ${DEFAULT_MODEL} (default).`, { markdown: false });
+        await send(`✅ Model override cleared — back to ${DEFAULT_MODEL || 'the CLI default'}.`, { markdown: false });
       } else {
         st.model = m;
         saveState();
@@ -1181,7 +1529,7 @@ async function handleCommand(text) {
     case '/stop': {
       // /stop → chat lane · /stop bg → background lane · /stop all → both
       const which = arg.trim().toLowerCase();
-      const targets = which === 'all' ? Object.values(LANES) : which === 'bg' ? [LANES.bg] : [LANES.main];
+      const targets = which === 'all' ? allLanes() : which === 'bg' ? [...bgLanes] : [LANES.main];
       let dropped = 0;
       for (const l of targets) {
         dropped += l.queue.length;
@@ -1326,7 +1674,7 @@ async function handleCommand(text) {
       await send('🔄 Restarting bridge — back online in a few seconds…', { markdown: false });
       state.lastAnnounce = 0; // force the 🟢 online announce on reboot as confirmation
       saveState();
-      for (const l of Object.values(LANES)) l.current?.child?.kill('SIGKILL');
+      for (const l of allLanes()) l.current?.child?.kill('SIGKILL');
       process.exit(0); // KeepAlive revives us
     }
     default:
@@ -1423,8 +1771,8 @@ const QUEUE_MAX = 5;
 // lane so the chat lane stays answerable while they run.
 function pickLane(prompt) {
   const t = prompt.trimStart();
-  if (/^bg:\s*/i.test(t)) return LANES.bg;
-  if (BG_COMMAND_RE.test(t)) return LANES.bg;
+  if (/^bg:\s*/i.test(t)) return getBgLane();
+  if (BG_COMMAND_RE.test(t)) return getBgLane();
   return LANES.main;
 }
 
@@ -1441,6 +1789,14 @@ function dispatchPrompt(prompt, forcedLane, { priority = false } = {}) {
       const at = lane.priorityCount || 0;
       lane.queue.splice(at, 0, text);
       lane.priorityCount = at + 1;
+      return;
+    }
+    // Mid-task steering: hand the message to the RUNNING claude process so it
+    // picks it up on its next step — exactly like typing mid-task in
+    // interactive Claude Code. Falls back to the queue in the narrow windows
+    // where the child can't take input (pre-spawn, result already in, /new'd).
+    if (lane.current.steer && lane.current.steer(text)) {
+      send('➡️ Sent into the running task.', { markdown: false }).catch(() => {});
       return;
     }
     if (lane.queue.length >= QUEUE_MAX) {
@@ -1670,7 +2026,7 @@ async function main() {
 }
 
 process.on('SIGTERM', () => {
-  for (const l of Object.values(LANES)) l.current?.child?.kill('SIGTERM');
+  for (const l of allLanes()) l.current?.child?.kill('SIGTERM');
   process.exit(0);
 });
 

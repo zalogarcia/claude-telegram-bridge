@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Hand a long job to the Telegram bridge's BACKGROUND lane and return instantly.
+// Hand a long job to a Telegram bridge BACKGROUND worker and return instantly.
 //
 //   node bg.mjs "run the full test suite and report what fails"
 //
@@ -7,11 +7,14 @@
 // text in its own background Claude session, streaming progress to Telegram.
 // The calling session is free immediately.
 //
-// When the job finishes, its output is delivered to the CHAT lane (M) as a
-// worker report — the assistant decides what to do and gives you a short update.
+// Workers are unbounded: if one is busy, the daemon spawns another, so several
+// handoffs run in PARALLEL rather than queueing behind each other.
+//
+// When the job finishes, its output is delivered to the CHAT lane as a worker
+// report — the assistant decides what to do and gives you a short update.
 // Raw output never goes straight to your chat. History: bg-results.jsonl.
 //
-// The background lane is a SEPARATE session: it does not see your conversation,
+// A background worker is a SEPARATE session: it does not see your conversation,
 // so write each task self-contained. Its result does NOT come back into your
 // current turn — use it for "go do this and report", not for work whose result
 // you need in order to answer right now.

@@ -19,21 +19,21 @@ Claude Code runs it **on your machine**, in your repos, with your config and you
 sessions — and answers you.
 
 ```
-you  ▸ what's failing in the checkout tests?
-  M  ▸ 🤖 Working · 34s · 6 steps
-       💻 Bash npm test -- checkout
-       📖 Read src/checkout/validate.ts
-       ✏️ Edit src/checkout/validate.ts
-  M  ▸ Two tests fail on the same cause: validateCart() returns early when
-       items is empty, so the discount branch never runs. Fixed and re-ran —
-       all 14 pass now.
+you ▸ what's failing in the checkout tests?
+bot ▸ 🤖 Thinking… · 34s · 6 steps
+      💻 Bash npm test -- checkout
+      📖 Read src/checkout/validate.ts
+      ✏️ Edit src/checkout/validate.ts
+bot ▸ Two tests fail on the same cause: validateCart() returns early when
+      items is empty, so the discount branch never runs. Fixed and re-ran —
+      all 14 pass now.
 ```
 
 ## Why this exists
 
 Claude Code is the best pair programmer available, and it's stuck on your desk.
 Every "remote Claude" option asks you to expose a port, run a tunnel, or ship
-your code to someone else's machine. This does none of that: it's ~1,400 lines
+your code to someone else's machine. This does none of that: it's ~2,000 lines
 of Node that long-polls the Telegram Bot API and pipes messages into
 `claude -p`. The only network traffic is your machine calling Telegram.
 
@@ -43,7 +43,9 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 |---|---|
 | 🔒 **No inbound network** | Long-polls Telegram. No tunnel, no open ports, no webhook, no third-party relay. |
 | 💬 **Persistent sessions** | Ask something today, follow up tomorrow — same conversation. Survives restarts and reboots. |
-| 🌗 **Two lanes** | Long jobs (`/goal`, `/autopilot`, test suites) run in a *separate* background session so the chat stays answerable. Ask something else while they work. |
+| 🗂️ **Named, resumable chats** | `/rename` a conversation, `/chats` to list them, `/resume` to switch back. `/compact` summarizes a long one into a fresh chat. |
+| 🌙 **Unlimited background workers** | Long jobs (`/goal`, `/autopilot`, test suites) run in *separate* Claude sessions. If a worker is busy, another spawns — parallel, never queued behind each other. |
+| ➡️ **Mid-task steering** | Message while a task is running and it goes *into* the running task, exactly like typing mid-turn in Claude Code. |
 | 📊 **Live progress** | Watch tool calls stream in as it works — including subagent activity, indented. |
 | 🎙️ **Voice notes** | Talk instead of typing. Transcribed with Whisper, run as a prompt. |
 | 📎 **Files & photos** | Send a screenshot with "why does this look broken?" — images, PDFs, code, anything ≤20MB. |
@@ -93,41 +95,58 @@ your reminders in plain English.
             ▼
    bridge.mjs  ── service manager keeps it alive, watchdog catches wedges
     │
-    ├── 🤖 chat lane        claude -p --resume <sessionId>     always answerable
-    └── 🌙 background lane  claude -p --resume <bgSessionId>   long jobs + scheduled tasks
+    ├── 🤖 chat lane      claude -p --resume <sessionId>     always answerable
+    └── 🌙 worker pool    bg1: --resume <bgSessionId>        long jobs + scheduled tasks
+                          bg2, bg3, … spawn on demand        fresh, self-contained
                                      │
                                      └── on completion → report goes to the CHAT lane,
                                          which summarizes it for you in plain words
 ```
 
-**The two lanes are the important part.** A headless Claude run occupies its
+**The lane split is the important part.** A headless Claude run occupies its
 process until it finishes — so a 20-minute `/autopilot` would normally mean 20
 minutes of silence. Long commands, anything prefixed `bg:`, scheduled tasks, and
-assistant-initiated handoffs run in a second Claude session instead. You keep
+assistant-initiated handoffs run in their own Claude session instead. You keep
 chatting while they work.
 
+The background pool is **unbounded**: `bg1` keeps a persistent session, and every
+additional job that arrives while the pool is busy spawns its own worker (`bg2`,
+`bg3`, …) rather than queueing. Extra workers are ephemeral — they run one
+self-contained task and are cleaned up when they drain.
+
 When a background job finishes, its output is delivered **to the chat session, not
-to you** — framed as untrusted worker data, capped at 3 consecutive reports so a
+to you** — framed as untrusted worker data, capped at 6 consecutive reports so a
 failing job can't loop forever. The assistant decides whether more work is needed,
 then sends you a short human update. You get a colleague, not a log stream.
 
 **Sessions** are per-lane and per-directory, stored in `state.json` and resumed
 with `--resume`. `/cd` switches projects (and resets sessions, since Claude Code
-sessions are project-scoped).
+sessions are project-scoped). Chat-lane sessions are also kept in a rolling
+archive (last 60) so `/chats`, `/rename` and `/resume` can move between them.
+
+**Messages sent mid-task are steered into the running run** over the CLI's
+streaming-input mode — the same behavior as typing while Claude Code is working.
+It either folds your message into the current turn or answers it right after.
+Only when steering isn't possible (nothing running yet, run already finishing)
+does the message queue instead.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| *any text* | Runs in the chat lane — or the background lane if it looks long |
+| *any text* | Runs in the chat lane — steered into the running task if one is going, or a background worker if it looks long |
 | *any other* `/command` | Passed straight to Claude Code — your custom commands work |
 | photo / file | Saved to `inbox/` and handed to Claude; the caption is the instruction |
 | voice note | Transcribed (Whisper) and run as a prompt |
-| `/new [bg\|all]` | Fresh session (Claude Code's `/clear`) |
+| `/new [bg\|all]` | Fresh chat (Claude Code's `/clear`) — the old one is archived, not deleted |
+| `/chats` | List recent chats: name, id prefix, age, directory, context size |
+| `/rename <name>` | Name the current chat so you can find it again |
+| `/resume <name\|id>` | Switch back to any archived chat (by name, name prefix, or id prefix) |
+| `/compact` | Summarize this chat, archive it, and start fresh with the summary injected |
 | `/cd <path>` | Switch working directory (must be under `$HOME`) |
 | `/model [name]` | Show or set the model for future runs |
 | `/context` | Session context size + 5h block + weekly usage ([ccusage](https://github.com/ryoppippi/ccusage)) |
-| `/status` | Directory, sessions, model, and both lanes' state |
+| `/status` | Directory, session, model, and a live block per lane: elapsed, steps, current task, latest action |
 | `/stop [bg\|all]` | Kill the running task and clear that lane's queue |
 | `/restart` | Restart the daemon remotely |
 | `/logs` | Tail the daemon log |
@@ -137,11 +156,14 @@ sessions are project-scoped).
 | `/help` | All of the above, in Telegram |
 
 Prefix `run:` on a reminder (or `--run` in the CLI) to make it **execute** as a
-Claude task instead of just pinging you. Messages sent while a lane is busy queue
-up (max 5) and run in order.
+Claude task instead of just pinging you. Messages sent while a lane is busy are
+steered into the running task; anything that can't be steered queues (max 5) and
+runs in order.
 
-Interactive-only built-ins (`/compact`, the `/usage` screen) don't exist in
-headless mode — `/new` covers `/clear`, `/context` covers usage.
+`/compact` is the bridge's own implementation, not the interactive built-in: it
+asks the current session for a handoff summary, archives that session, and opens
+a fresh one primed with the summary. The interactive `/usage` screen has no
+headless equivalent — `/context` covers it.
 
 ## Security
 
@@ -206,7 +228,9 @@ doesn't wake to a backlog). Every key can be overridden with a
 - **Your machine must be awake.** Messages sent while it sleeps queue at Telegram
   and are skipped as stale if older than an hour.
 - **20MB file limit** — a Telegram Bot API cap, not ours.
-- **One task per lane.** Extra messages queue; internal work never gets dropped.
+- **One task per lane.** The chat lane runs one at a time (extra messages steer
+  into it or queue); background workers are unbounded and run in parallel.
+  Internal work never gets dropped.
 - **Only one poller per bot token.** Running a second instance causes Telegram 409s
   (the daemon backs off and recovers, but don't do it on purpose).
 - Tested on macOS with Claude Code 2.x. The Linux/systemd path is included and

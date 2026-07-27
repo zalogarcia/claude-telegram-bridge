@@ -30,6 +30,13 @@ function grab(name, kind = 'function') {
 }
 
 const PURE = [
+  // Dependency of archiveUpsert — extracted, not mirrored, so a cap change in
+  // bridge.mjs can't leave these tests green against a stale value.
+  src.match(/const ARCHIVE_CAP = \d+;/)[0],
+  grab('archiveUpsert'),
+  grab('matchArchive'),
+  grab('fmtAge'),
+  grab('fmtElapsed'),
   grab('escHtml', 'const'),
   grab('clip', 'const'),
   grab('quoteBlock', 'const'),
@@ -48,7 +55,7 @@ const M = await import(
   'data:text/javascript,' +
     encodeURIComponent(
       `const HOME=${JSON.stringify(HOME)};${words}\n${PURE.join('\n')}\n` +
-        `export {escHtml,clip,quoteBlock,thinkingWord,prettyPath,summarizeToolInput,renderEntry,renderTail,mdToTelegramHtml,chunks,THINKING_WORDS};`,
+        `export {escHtml,clip,quoteBlock,thinkingWord,prettyPath,summarizeToolInput,renderEntry,renderTail,mdToTelegramHtml,chunks,THINKING_WORDS,archiveUpsert,matchArchive,fmtAge,fmtElapsed};`,
     )
 );
 
@@ -271,6 +278,51 @@ t('thinking words cycle without going out of bounds', () => {
 t('the word pool is large enough to avoid quick repeats', () => {
   ok(M.THINKING_WORDS.length >= 12, `only ${M.THINKING_WORDS.length} words`);
   eq(new Set(M.THINKING_WORDS).size, M.THINKING_WORDS.length, 'duplicate words in the pool');
+});
+
+// ---------- chat registry helpers ----------
+t('archiveUpsert creates and merges entries', () => {
+  let a = M.archiveUpsert(undefined, 'aaaa', { at: 1, cwd: '/x' });
+  a = M.archiveUpsert(a, 'aaaa', { name: 'deals' });
+  eq(a.aaaa.name, 'deals');
+  eq(a.aaaa.cwd, '/x', 'merge must keep earlier fields');
+});
+
+t('archiveUpsert caps at 60, evicting oldest unnamed first', () => {
+  let a = {};
+  for (let i = 0; i < 60; i++) a = M.archiveUpsert(a, `id${i}`, { at: i });
+  a = M.archiveUpsert(a, 'named', { at: 0, name: 'keep-me' }); // oldest but named
+  a = M.archiveUpsert(a, 'newest', { at: 999 });
+  ok(Object.keys(a).length <= 60, `cap failed: ${Object.keys(a).length}`);
+  ok(a.named, 'named entry evicted before unnamed');
+  ok(!a.id0 || !a.id1, 'no unnamed entry was evicted');
+});
+
+t('matchArchive resolves exact name, name prefix, id prefix', () => {
+  const a = {
+    'abcd1234-x': { name: 'sales' },
+    'efgh5678-x': { name: 'salesfunnel' },
+    'zzzz9999-x': {},
+  };
+  eq(M.matchArchive(a, 'sales').id, 'abcd1234-x', 'exact name beats prefix clash');
+  eq(M.matchArchive(a, 'salesf').id, 'efgh5678-x', 'unique name prefix');
+  eq(M.matchArchive(a, 'zzzz').id, 'zzzz9999-x', 'id prefix');
+  ok(M.matchArchive(a, 'nope').error, 'miss must error');
+  ok(M.matchArchive(a, 'zz').error, 'id prefix under 4 chars must not match');
+});
+
+t('fmtAge picks sensible units', () => {
+  eq(M.fmtAge(5 * 60000), '5m');
+  eq(M.fmtAge(3 * 3600000), '3h');
+  eq(M.fmtAge(5 * 86400000), '5d');
+});
+
+t('fmtElapsed shows h/m/s at the right scales', () => {
+  eq(M.fmtElapsed(45), '45s');
+  eq(M.fmtElapsed(379), '6m 19s');
+  eq(M.fmtElapsed(360), '6m');
+  eq(M.fmtElapsed(4320), '1h 12m');
+  eq(M.fmtElapsed(7200), '2h');
 });
 
 // ---------- rate-limit budget (the fix this suite exists to protect) ----------

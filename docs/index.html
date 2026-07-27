@@ -401,7 +401,7 @@ try {
     <p class="eyebrow">How it works</p>
     <h2>A daemon on your machine, holding one end of the line.</h2>
     <p>
-      About 1,400 lines of Node long-poll the Telegram Bot API and pipe whatever you
+      About 2,000 lines of Node long-poll the Telegram Bot API and pipe whatever you
       send into <span class="inline">claude -p</span>. Your service manager keeps it
       alive; a watchdog catches the rare wedge and tells you it did.
     </p>
@@ -415,19 +415,21 @@ try {
       <div class="indent">
         <div class="link">routes by length</div>
         <div class="node lane-a"><b>🤖 chat lane</b> <span>claude -p --resume · always answerable</span></div>
-        <div class="node lane-b" style="margin-top:.6rem"><b>🌙 background lane</b> <span>long jobs, scheduled tasks · separate session</span></div>
+        <div class="node lane-b" style="margin-top:.6rem"><b>🌙 background workers</b> <span>long jobs, scheduled tasks · one session each, spawned on demand</span></div>
         <div class="link" style="margin-top:.6rem">on completion, the report goes to the chat lane —<br />which summarizes it for you in plain words</div>
       </div>
     </div>
 
     <div class="feats" style="margin-top:3rem">
       <div class="feat">
-        <div><span class="tag">the hard part</span><h3>Two lanes</h3></div>
+        <div><span class="tag">the hard part</span><h3>Unlimited background workers</h3></div>
         <p>
           A headless Claude run occupies its process until it finishes — so a
           twenty-minute job would normally mean twenty minutes of silence. Long
-          commands, scheduled tasks, and anything the assistant judges slow run in a
-          <em>second</em> Claude session instead. You keep chatting while they work.
+          commands, scheduled tasks, and anything the assistant judges slow run in
+          their <em>own</em> Claude session instead. If a worker is busy, another
+          spawns — they run in parallel, never queued behind each other, and you
+          keep chatting while they work.
         </p>
       </div>
       <div class="feat">
@@ -450,7 +452,7 @@ try {
     <div class="feats">
       <div class="feat">
         <div><span class="tag">memory</span><h3>Sessions that persist</h3></div>
-        <p>Ask something today, follow up tomorrow — same conversation. Survives restarts, reboots and sleep. <span class="inline">/new</span> when you want a clean slate, <span class="inline">/cd</span> to switch projects.</p>
+        <p>Ask something today, follow up tomorrow — same conversation. Survives restarts, reboots and sleep. <span class="inline">/new</span> when you want a clean slate, <span class="inline">/cd</span> to switch projects. Name chats with <span class="inline">/rename</span>, list them with <span class="inline">/chats</span>, jump back with <span class="inline">/resume</span>, or fold a long one into a fresh session with <span class="inline">/compact</span>.</p>
       </div>
       <div class="feat">
         <div><span class="tag">visibility</span><h3>Live progress</h3></div>
@@ -508,12 +510,14 @@ try {
       <table>
         <thead><tr><th>Send this</th><th>And it does</th></tr></thead>
         <tbody>
-          <tr><td>any text</td><td>Runs in the chat lane — or the background lane if it looks long</td></tr>
+          <tr><td>any text</td><td>Runs in the chat lane — steered into the running task if one is going, or a background worker if it looks long</td></tr>
           <tr><td>/goal, /autopilot…</td><td>Any other slash command passes straight through to Claude Code</td></tr>
           <tr><td>photo · file · voice</td><td>Saved locally and handed to Claude; your caption is the instruction</td></tr>
-          <tr><td>/new · /cd</td><td>Fresh session · switch working directory</td></tr>
+          <tr><td>/new · /cd</td><td>Fresh chat (the old one stays resumable) · switch working directory</td></tr>
+          <tr><td>/chats · /rename · /resume</td><td>List saved chats · name this one · switch back to any of them</td></tr>
+          <tr><td>/compact</td><td>Summarize this chat and start fresh with the summary carried over</td></tr>
           <tr><td>/model · /context</td><td>Show or set the model · context size and token usage</td></tr>
-          <tr><td>/status · /logs</td><td>Both lanes' state · tail the daemon log</td></tr>
+          <tr><td>/status · /logs</td><td>Live state of the chat lane and every worker · tail the daemon log</td></tr>
           <tr><td>/stop · /restart</td><td>Kill the running task · restart the daemon remotely</td></tr>
           <tr><td>/remind · /schedules</td><td>Daily, one-off or relative reminders — and scheduled tasks that run</td></tr>
         </tbody>
