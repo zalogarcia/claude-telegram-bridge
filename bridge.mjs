@@ -322,7 +322,22 @@ const THINKING_WORDS = [
 const thinkingWord = (i) => THINKING_WORDS[i % THINKING_WORDS.length];
 const WORD_HOLD_SEC = 12; // how long one word stays up — the knob to tune the pace
 
-const clip = (s, n) => (s.length > n ? s.slice(0, n - 1).trimEnd() + '…' : s);
+// Truncate for display. ALWAYS marks the cut with an ellipsis — a clipped
+// string with no marker reads on the phone as a message that got lost in
+// transit rather than one deliberately previewed. Cuts on a word boundary when
+// one sits reasonably close to the limit (past 60% of the window), else hard.
+// Every user-visible truncation goes through here; never raw .slice() into a
+// send() — that is what made the bg-handoff ack look broken.
+const clip = (s, n) => {
+  const str = String(s);
+  if (str.length <= n) return str;
+  const head = str.slice(0, n - 1);
+  const sp = head.lastIndexOf(' ');
+  return (sp > n * 0.6 ? head.slice(0, sp) : head).trimEnd() + '…';
+};
+// Collapse newlines/runs of spaces so a multi-line agent prompt previews as one
+// readable line instead of dumping its raw formatting into the chat.
+const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
 
 // Absolute paths eat a whole phone line and the identifying part is the tail.
 // /home/you/src/my-project/inbox/photo.jpg -> …/inbox/photo.jpg
@@ -984,7 +999,7 @@ function handBackToChat(task, output, status) {
   if (handbackStreak > HANDBACK_STREAK_MAX) {
     // Stop feeding the assistant; surface the raw outcome to the owner instead.
     send(
-      `⚠️ Background work looped ${handbackStreak - 1}× with no reply from you — stopping the chain.\nLast task: ${task.slice(0, 200)}\nOutcome: ${String(output).slice(0, 1500)}`,
+      `⚠️ Background work looped ${handbackStreak - 1}× with no reply from you — stopping the chain.\nLast task: ${clip(oneLine(task), 200)}\nOutcome: ${clip(String(output), 1500)}`,
       { markdown: false },
     ).catch(() => {});
     return;
@@ -1027,7 +1042,10 @@ function drainBgHandoff() {
   for (const it of items) {
     const text = typeof it === 'string' ? it : it?.text;
     if (!text) continue;
-    send(`🌙 Handed to the background lane: ${text.slice(0, 120)}`, { markdown: false }).catch(() => {});
+    // 120 chars was under one phone line and cut mid-word — on a long agent
+    // prompt it showed only the boilerplate preamble and looked truncated by
+    // accident. 240 + a visible ellipsis gets the actual gist across.
+    send(`🌙 Handed to the background lane: ${clip(oneLine(text), 240)}`, { markdown: false }).catch(() => {});
     dispatchPrompt(text, getBgLane(), { priority: true }); // already claimed out of the file — must not be dropped
   }
 }
@@ -1073,7 +1091,7 @@ const localHHMM = () => new Date().toTimeString().slice(0, 5);
 
 function fmtSchedule(s) {
   const when = s.kind === 'daily' ? `daily ${s.at}` : new Date(s.at).toLocaleString();
-  return `#${s.id} · ${when} · ${s.run ? '🤖 run' : '⏰ remind'} · ${s.text.slice(0, 80)}`;
+  return `#${s.id} · ${when} · ${s.run ? '🤖 run' : '⏰ remind'} · ${clip(oneLine(s.text), 80)}`;
 }
 
 // Called from the poll loop (≤~90s granularity). Sleep-tolerant: a time that
@@ -1098,7 +1116,7 @@ function checkSchedules() {
     if (due) {
       changed = true;
       if (s.run) {
-        send(`⏰ #${s.id} starting scheduled task: ${s.text.slice(0, 100)}`, { markdown: false }).catch(() => {});
+        send(`⏰ #${s.id} starting scheduled task: ${clip(oneLine(s.text), 100)}`, { markdown: false }).catch(() => {});
         // scheduled work must never block chat, and must not be dropped on a
         // full queue. getBgLane(), not the old LANES.bg — that key died in the
         // lane-pool refactor and the undefined fell through to the CHAT lane.
@@ -1951,7 +1969,7 @@ async function handleUpdate(update) {
   if (ageSec > STALE_SEC) {
     const what = msg.text || `<${pickMedia(msg)?.kind || 'media'}>`;
     console.log(`[bridge] skipping stale message (${Math.round(ageSec / 60)} min old): ${what.slice(0, 60)}`);
-    await send(`⏭️ Skipped stale message (${Math.round(ageSec / 60)} min old): "${what.slice(0, 60)}"`, {
+    await send(`⏭️ Skipped stale message (${Math.round(ageSec / 60)} min old): "${clip(oneLine(what), 60)}"`, {
       markdown: false,
     }).catch(() => {});
     return;
