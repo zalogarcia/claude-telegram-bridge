@@ -1158,9 +1158,64 @@ function modelWindow(name) {
   return 200_000;
 }
 
+// Telegram's HTML has NO table tag — its whole vocabulary is b/i/u/s/a/code/
+// pre/blockquote/span — so a markdown table used to reach the phone as raw pipe
+// soup with the |---|---| separator sitting there in plain sight.
+//
+// Reshaped into a titled block per row instead: first cell becomes the bold
+// heading, remaining cells become "column: value" lines. Chosen over rendering
+// the grid inside <pre>: a fixed-width grid only holds while every row fits the
+// screen, and on a phone a 3-column table almost never does — it wraps and the
+// columns scramble, which is worse than no table at all.
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+// Require a LEADING pipe: without it any prose line containing "a | b" would be
+// read as a table row.
+const isTableRow = (l) => /^\s*\|/.test(l) && /\|/.test(l);
+// Split on unescaped pipes only, so a cell may contain a literal \| .
+const splitCells = (line) =>
+  line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split(/(?<!\\)\|/)
+    .map((c) => c.replace(/\\\|/g, '|').trim());
+
+function renderMdTables(text) {
+  const lines = text.split('\n');
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    const sep = lines[i + 1];
+    // header row, separator row, then one or more body rows
+    if (isTableRow(lines[i]) && sep !== undefined && sep.includes('|') && TABLE_SEP.test(sep)) {
+      const headers = splitCells(lines[i]);
+      let j = i + 2;
+      const rows = [];
+      while (j < lines.length && isTableRow(lines[j])) rows.push(splitCells(lines[j++]));
+      if (rows.length) {
+        for (const cells of rows) {
+          const title = cells[0] || '';
+          // Bold markdown inside the cell already produced <b>; don't nest it.
+          if (title) out.push(title.includes('<b>') ? title : `<b>${title}</b>`);
+          for (let k = 1; k < cells.length; k++) {
+            const v = cells[k];
+            if (!v) continue; // empty cell — the column doesn't apply to this row
+            const h = headers[k];
+            out.push(h ? `· <i>${h}</i>: ${v}` : `· ${v}`);
+          }
+          out.push('');
+        }
+        i = j - 1;
+        continue;
+      }
+    }
+    out.push(lines[i]);
+  }
+  return out.join('\n');
+}
+
 // Convert Claude's markdown replies to Telegram-HTML (headers→bold, fences→pre,
-// inline code, links, bullets). Code spans are extracted first so no transform
-// touches their contents. Sender falls back to plain text on any parse reject.
+// inline code, links, bullets, tables). Code spans are extracted first so no
+// transform touches their contents. Sender falls back to plain on a parse reject.
 function mdToTelegramHtml(md) {
   const fences = [];
   // Keep the fence language — Telegram syntax-highlights <pre><code class="language-x">.
@@ -1189,6 +1244,10 @@ function mdToTelegramHtml(md) {
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     (_, label, href) => `<a href="${href.replace(/"/g, '&quot;')}">${label}</a>`,
   );
+  // After bold/italic/links so cell contents keep their inline formatting, and
+  // before the bullet rule — table rows start with '|', never '-', so neither
+  // transform can eat the other's input.
+  t = renderMdTables(t);
   t = t.replace(/^(\s*)[-*]\s+/gm, '$1• ');
   // Markdown "> quote" — escHtml already turned the marker into &gt;.
   // Consecutive quoted lines collapse into ONE blockquote (they can't nest).
