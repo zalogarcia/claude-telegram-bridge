@@ -2,6 +2,7 @@
 // Hand a long job to a Telegram bridge BACKGROUND worker and return instantly.
 //
 //   node bg.mjs "run the full test suite and report what fails"
+//   node bg.mjs --file ./brief.md          # preferred for anything longer
 //
 // The bridge daemon drains this drop-box each poll cycle (≤~1 min) and runs the
 // text in its own background Claude session, streaming progress to Telegram.
@@ -24,10 +25,38 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), 'bg-queue.json');
-const text = process.argv.slice(2).join(' ').trim();
+
+// --file <path> reads the brief from disk instead of argv. Use it for anything
+// longer than a line.
+//
+// Passing a brief as a shell argument means backticks inside it become COMMAND
+// SUBSTITUTION: a brief mentioning `SomeName` or `npm run build` reaches the
+// worker with those terms silently REPLACED BY EMPTY STRINGS — the shell prints
+// "command not found" and hands over a brief missing the exact facts it was
+// written to convey. `[a, b]` trips glob expansion the same way. Single-quoting
+// is a workaround that breaks on the first apostrophe, which prose always has.
+// Reading from a file removes the shell from the path entirely.
+const argv = process.argv.slice(2);
+let text;
+const fileFlag = argv.indexOf('--file');
+if (fileFlag !== -1) {
+  const p = argv[fileFlag + 1];
+  if (!p) {
+    console.error('usage: node bg.mjs --file <path-to-brief>');
+    process.exit(1);
+  }
+  try {
+    text = readFileSync(p, 'utf8').trim();
+  } catch (e) {
+    console.error(`bg.mjs: cannot read brief at ${p}: ${e.message}`);
+    process.exit(1);
+  }
+} else {
+  text = argv.join(' ').trim();
+}
 
 if (!text) {
-  console.error('usage: node bg.mjs "<task for the background lane>"');
+  console.error('usage: node bg.mjs "<task>"   |   node bg.mjs --file <path-to-brief>');
   process.exit(1);
 }
 

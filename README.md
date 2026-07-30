@@ -116,6 +116,12 @@ cleaned up when it drains, so a worker never resumes (or pays for) the context o
 an earlier job. They also get an hour-scale timeout rather than the chat lane's
 30-minute ceiling: the lane exists for work measured in hours.
 
+Jobs can also be handed off from a terminal with `node bg.mjs "<task>"`. For
+anything longer than a line, use `node bg.mjs --file ./brief.md` instead — passing
+a brief as a shell argument turns backticks inside it into command substitution,
+so a brief mentioning `SomeName` or `npm run build` reaches the worker with those
+terms silently replaced by empty strings.
+
 When a background job finishes, its output is delivered **to the chat session, not
 to you** — framed as untrusted worker data, capped at 6 consecutive reports so a
 failing job can't loop forever. The assistant decides whether more work is needed,
@@ -147,7 +153,7 @@ does the message queue instead.
 | `/compact` | Summarize this chat, archive it, and start fresh with the summary injected |
 | `/cd <path>` | Switch working directory (must be under `$HOME`) |
 | `/model [name]` | Show or set the model for future runs |
-| `/context` | Session context size + 5h block + weekly usage ([ccusage](https://github.com/ryoppippi/ccusage)) |
+| `/context` | Session context size, your 5h and weekly plan limits (% used + time left), and token/cost totals ([ccusage](https://github.com/ryoppippi/ccusage)). The limits need [one line in your statusline](docs/statusline.md); everything else works out of the box |
 | `/status` | Directory, session, model, and a live block per lane: elapsed, steps, current task, latest action |
 | `/stop [bg\|all]` | Kill the running task and clear that lane's queue |
 | `/restart` | Restart the daemon remotely |

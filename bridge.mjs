@@ -1150,6 +1150,47 @@ function fmtTokens(n) {
   return String(n);
 }
 
+// Plan-limit % + reset clocks, as shown in the Claude Code terminal footer.
+// Claude Code feeds those numbers to the statusline command's stdin and nowhere
+// else — no CLI, no state file — and a headless bridge run has no statusline, so
+// /context can only show them if your statusline caches them. Add this to your
+// statusline script (see docs/statusline.md) and /context picks them up:
+//
+//   printf '%s' "$input" | jq -c --argjson now "$(date +%s)" \
+//     '{captured_at:$now, rate_limits:.rate_limits}' > ~/.claude/cache/rate-limits.json
+//
+// resets_at is an absolute epoch, so "time left" stays exact however old the
+// read is; only the % can be stale, which is why the age gets surfaced.
+const RATE_LIMIT_CACHE = process.env.BRIDGE_RATE_LIMIT_CACHE || path.join(HOME, '.claude', 'cache', 'rate-limits.json');
+
+function readRateLimits() {
+  try {
+    const j = JSON.parse(readFileSync(RATE_LIMIT_CACHE, 'utf8'));
+    return j?.rate_limits ? j : null;
+  } catch {
+    return null;
+  }
+}
+
+// Matches the footer's units: hours+minutes under a day, days+hours over.
+function fmtLeft(resetsAt) {
+  const mins = Math.round((Number(resetsAt) * 1000 - Date.now()) / 60000);
+  if (!Number.isFinite(mins) || mins <= 0) return 'now';
+  const d = Math.floor(mins / 1440);
+  const h = Math.floor((mins % 1440) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  return h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`;
+}
+
+// "37% used · 3h49m left" — either half is omitted if the window lacks it.
+function fmtLimit(win) {
+  if (!win) return null;
+  const bits = [];
+  if (typeof win.used_percentage === 'number') bits.push(`${Math.round(win.used_percentage)}% used`);
+  if (win.resets_at) bits.push(`${fmtLeft(win.resets_at)} left`);
+  return bits.length ? bits.join(' · ') : null;
+}
+
 // Context window by model family. Fable/Opus/Sonnet 5 run 1M by default
 // (per platform docs, verified 2026-07-24); Haiku and unknowns assume 200k.
 function modelWindow(name) {
@@ -1302,24 +1343,43 @@ async function gatherContext(st) {
     execJson('npx', ['-y', 'ccusage@latest', 'weekly', '--json']),
   ]);
   const lines = [`🧠 Bridge session context: ${ctx}`];
+
+  // Plan limits first — they're the numbers that decide whether to keep going.
+  const rl = readRateLimits();
+  const fiveH = fmtLimit(rl?.rate_limits?.five_hour);
+  const sevenD = fmtLimit(rl?.rate_limits?.seven_day);
   const active = blocks?.blocks?.find((b) => b.isActive);
-  if (active) {
+  const week = weekly?.weekly?.at(-1);
+
+  if (fiveH) {
+    lines.push(`⏳ 5h limit: ${fiveH}`);
+  } else if (active) {
+    // No cached statusline read — fall back to ccusage's own block clock, which
+    // is transcript-derived (block start + 5h), not the plan's real reset.
     const minsLeft = Math.max(0, Math.round((new Date(active.endTime).getTime() - Date.now()) / 60000));
-    lines.push(
-      `⏳ Current 5h block: ${fmtTokens(active.totalTokens)} tokens · ~$${Math.round(active.costUSD || 0)} API-equiv · resets in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m`,
-    );
+    lines.push(`⏳ 5h block: resets in ${Math.floor(minsLeft / 60)}h ${minsLeft % 60}m (limit % unavailable)`);
   } else {
     lines.push(blocks ? '⏳ 5h block: none active' : '⏳ 5h block: unavailable (ccusage failed)');
   }
-  const week = weekly?.weekly?.at(-1);
-  if (week) {
-    lines.push(
-      `📅 This week (${week.period || 'current'}): ${fmtTokens(week.totalTokens)} tokens · ~$${Math.round(week.totalCost || 0)} API-equiv`,
-    );
+
+  lines.push(sevenD ? `📅 Weekly limit: ${sevenD}` : '📅 Weekly limit: unavailable');
+
+  const blockTok = active ? `${fmtTokens(active.totalTokens)} this 5h block (~$${Math.round(active.costUSD || 0)})` : null;
+  const weekTok = week ? `${fmtTokens(week.totalTokens)} this week (~$${Math.round(week.totalCost || 0)})` : null;
+  if (blockTok || weekTok) lines.push(`🔢 Tokens: ${[blockTok, weekTok].filter(Boolean).join(' · ')}`);
+
+  const note = ['ℹ️'];
+  if (rl) {
+    const ageMin = Math.max(0, Math.round((Date.now() / 1000 - (rl.captured_at || 0)) / 60));
+    const age = ageMin < 2 ? 'just now' : ageMin < 90 ? `${ageMin}m ago` : `${Math.round(ageMin / 60)}h ago`;
+    // Only the % goes stale — reset clocks are absolute — but a % read hours old
+    // can badly understate usage, so the age is always stated.
+    note.push(`Limits read from the terminal footer ${age}.`);
   } else {
-    lines.push('📅 Week: unavailable (ccusage failed)');
+    note.push('Limits need the statusline cache — see docs/statusline.md.');
   }
-  lines.push('', 'ℹ️ Machine-wide counts from local transcripts (ccusage); $ is API-equivalent value, not billing.');
+  note.push('Token/$ counts are machine-wide from local transcripts (ccusage); $ is API-equivalent value, not billing.');
+  lines.push('', note.join(' '));
   await send(lines.join('\n'), { markdown: false });
 }
 
@@ -1333,7 +1393,7 @@ const BOT_COMMANDS = [
   { command: 'resume', description: 'Switch to a saved chat' },
   { command: 'compact', description: 'Summarize -> fresh chat with summary' },
   { command: 'status', description: 'Live status: chat + every worker, right now' },
-  { command: 'context', description: 'Context size + 5h block + weekly usage' },
+  { command: 'context', description: 'Context size + 5h/weekly limits left' },
   { command: 'model', description: 'Show or set the model' },
   { command: 'cd', description: 'Set working directory (resets session)' },
   { command: 'stop', description: 'Kill current task + discard queue' },

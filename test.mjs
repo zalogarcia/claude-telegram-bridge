@@ -19,14 +19,28 @@ const DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOME = homedir();
 const src = readFileSync(path.join(DIR, 'bridge.mjs'), 'utf8');
 
+// Extract one top-level declaration by lines, not by regex: bridge.mjs is
+// prettier-formatted, so every continuation line of a declaration is indented
+// (or blank) and the next column-0 line begins the next declaration. A lazy
+// `[\s\S]*?;` stops at the first semicolon INSIDE a multi-line arrow body
+// (clip's `const str = String(s);`), which builds unparseable source and kills
+// the whole file with a SyntaxError before a single test runs — invisible,
+// because a dead harness reports no failures.
+const SRC_LINES = src.split('\n');
 function grab(name, kind = 'function') {
-  const re =
-    kind === 'function'
-      ? new RegExp(`\\nfunction ${name}\\b[\\s\\S]*?\\n\\}`)
-      : new RegExp(`\\nconst ${name} =[\\s\\S]*?;\\n`);
-  const m = src.match(re);
-  if (!m) throw new Error(`could not extract ${name} from bridge.mjs — did it get renamed?`);
-  return m[0];
+  const head = kind === 'function' ? new RegExp(`^(?:async )?function ${name}\\b`) : new RegExp(`^const ${name}\\b`);
+  const start = SRC_LINES.findIndex((l) => head.test(l));
+  if (start === -1) throw new Error(`could not extract ${name} from bridge.mjs — did it get renamed?`);
+  const out = [SRC_LINES[start]];
+  for (let i = start + 1; i < SRC_LINES.length; i++) {
+    const l = SRC_LINES[i];
+    if (/^\S/.test(l)) {
+      if (l.startsWith('}')) out.push(l); // the declaration's own closing brace
+      break;
+    }
+    out.push(l);
+  }
+  return out.join('\n');
 }
 
 const PURE = [
@@ -37,6 +51,8 @@ const PURE = [
   grab('matchArchive'),
   grab('fmtAge'),
   grab('fmtElapsed'),
+  grab('fmtLeft'),
+  grab('fmtLimit'),
   grab('escHtml', 'const'),
   grab('clip', 'const'),
   grab('quoteBlock', 'const'),
@@ -45,6 +61,11 @@ const PURE = [
   grab('summarizeToolInput'),
   grab('renderEntry'),
   grab('renderTail'),
+  // renderMdTables + its own helpers — dependencies of mdToTelegramHtml.
+  grab('TABLE_SEP', 'const'),
+  grab('isTableRow', 'const'),
+  grab('splitCells', 'const'),
+  grab('renderMdTables'),
   grab('mdToTelegramHtml'),
   grab('chunks'),
 ];
@@ -55,7 +76,7 @@ const M = await import(
   'data:text/javascript,' +
     encodeURIComponent(
       `const HOME=${JSON.stringify(HOME)};${words}\n${PURE.join('\n')}\n` +
-        `export {escHtml,clip,quoteBlock,thinkingWord,prettyPath,summarizeToolInput,renderEntry,renderTail,mdToTelegramHtml,chunks,THINKING_WORDS,archiveUpsert,matchArchive,fmtAge,fmtElapsed};`,
+        `export {escHtml,clip,quoteBlock,thinkingWord,prettyPath,summarizeToolInput,renderEntry,renderTail,mdToTelegramHtml,chunks,THINKING_WORDS,archiveUpsert,matchArchive,fmtAge,fmtElapsed,fmtLeft,fmtLimit};`,
     )
 );
 
@@ -315,6 +336,38 @@ t('fmtAge picks sensible units', () => {
   eq(M.fmtAge(5 * 60000), '5m');
   eq(M.fmtAge(3 * 3600000), '3h');
   eq(M.fmtAge(5 * 86400000), '5d');
+});
+
+// ---------- plan-limit rendering for /context ----------
+// resets_at arrives as absolute epoch SECONDS (that's what a statusline script
+// subtracts `date +%s` from); reading it as ms would print "now" forever.
+const inSec = (s) => Math.floor(Date.now() / 1000) + s;
+
+t('fmtLeft matches the footer units: h+m short, d+h long', () => {
+  eq(M.fmtLeft(inSec(3 * 3600 + 49 * 60)), '3h 49m');
+  eq(M.fmtLeft(inSec(42 * 60)), '42m');
+  eq(M.fmtLeft(inSec(2 * 86400 + 4 * 3600)), '2d 4h');
+});
+
+t('fmtLeft never shows a negative clock', () => {
+  eq(M.fmtLeft(inSec(-3600)), 'now');
+  eq(M.fmtLeft(inSec(0)), 'now');
+});
+
+t('fmtLeft rejects millisecond input instead of silently printing "now"', () => {
+  ok(M.fmtLeft(Date.now() + 3600_000) !== 'now', 'ms input must not read as expired');
+});
+
+t('fmtLimit renders "% used · time left"', () => {
+  eq(M.fmtLimit({ used_percentage: 37.4, resets_at: inSec(3 * 3600 + 49 * 60) }), '37% used · 3h 49m left');
+});
+
+t('fmtLimit degrades instead of printing "undefined%"', () => {
+  eq(M.fmtLimit(null), null);
+  eq(M.fmtLimit({}), null);
+  eq(M.fmtLimit({ used_percentage: 0, resets_at: inSec(600) }), '0% used · 10m left');
+  eq(M.fmtLimit({ resets_at: inSec(600) }), '10m left');
+  eq(M.fmtLimit({ used_percentage: 88 }), '88% used');
 });
 
 t('fmtElapsed shows h/m/s at the right scales', () => {
