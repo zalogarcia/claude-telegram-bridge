@@ -29,7 +29,10 @@ export const stripHtml = (s) =>
 // the grid inside <pre>: a fixed-width grid only holds while every row fits the
 // screen, and on a phone a 3-column table almost never does — it wraps and the
 // columns scramble, which is worse than no table at all.
-const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+// Exported because rich-format.mjs detects tables too, and the two renderers
+// must agree on what counts as one. Stateless (no /g flag), so sharing the
+// object across modules is safe.
+export const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
 // Require a LEADING pipe: without it any prose line containing "a | b" would be
 // read as a table row.
 export const isTableRow = (l) => /^\s*\|/.test(l) && /\|/.test(l);

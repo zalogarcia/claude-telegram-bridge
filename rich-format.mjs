@@ -1,6 +1,6 @@
 // Markdown -> Telegram rich blocks (Bot API 10.2 `sendRichMessage`).
 //
-// Telegram has no table tag in HTML mode, so `renderMdTables` in bridge.mjs
+// Telegram has no table tag in HTML mode, so `renderMdTables` in md-format.mjs
 // flattens every markdown table into "bold title + · header: value" bullets.
 // That reads fine for a 2-column table and badly for a 4-column comparison.
 // Bot API 10.2 added real block formatting, so tables can be tables again.
@@ -37,15 +37,12 @@
 // gives the HTML path expandable blockquotes, so only a genuine TABLE is worth
 // leaving HTML for. Kill switch: TG_RICH=0.
 
-const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
-const isTableRow = (l) => /^\s*\|/.test(l) && /\|/.test(l);
-const splitCells = (line) =>
-  line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split(/(?<!\\)\|/)
-    .map((c) => c.replace(/\\\|/g, '|').trim());
+// Table parsing is shared with the HTML path rather than reimplemented here.
+// Both renderers must agree on what a table IS: `shouldUseRich` below decides a
+// message goes rich BECAUSE it found a table, and the HTML fallback has to find
+// the same one. Two copies of this predicate could disagree and route a message
+// to a renderer that then declines to draw the table that caused the routing.
+import { TABLE_SEP, isTableRow, splitCells } from './md-format.mjs';
 
 // Telegram accepted size:1 in probing. Deeper levels are clamped rather than
 // guessed at — an unsupported size rejects the WHOLE message, and a heading
