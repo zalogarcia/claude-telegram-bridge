@@ -15,6 +15,7 @@ import { homedir, hostname, platform } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
+import { mdToRichBlocks, chunkBlocks, shouldUseRich, stripModeMarkers, detailsToHtml } from './rich-format.mjs';
 
 const HOME = homedir();
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -1314,8 +1315,37 @@ const stripHtml = (s) =>
 
 // Final results go out formatted; a chunk Telegram can't parse (e.g. a tag cut
 // by the chunk boundary) degrades to plain text for that chunk only.
+// Bot API 10.2 rich blocks: real tables. Off by an env kill switch (TG_RICH=0)
+// and self-disabling — the FIRST failure flips richOk so every later answer
+// takes the HTML path. A Telegram-side regression costs one degraded message,
+// never a silent outage. sendResult's job is that the answer always arrives.
+let richOk = process.env.TG_RICH !== '0';
+
+async function sendRich(text) {
+  if (!richOk) return false;
+  // Rich blocks cannot carry inline bold/code (Telegram drops parse_mode and
+  // entities inside them), so they are used only for a real TABLE, which is the
+  // one thing the HTML path genuinely cannot express.
+  if (!shouldUseRich(text)) return false;
+  const blocks = mdToRichBlocks(stripModeMarkers(text));
+  if (!blocks.length) return false;
+  try {
+    for (const group of chunkBlocks(blocks)) {
+      await tg('sendRichMessage', { chat_id: CHAT_ID, rich_message: { blocks: group } });
+    }
+    return true;
+  } catch (e) {
+    richOk = false;
+    console.error(`[bridge] rich send failed, falling back to HTML for the rest of this run: ${e.message}`);
+    return false;
+  }
+}
+
 async function sendResult(text) {
-  const html = mdToTelegramHtml(text);
+  if (await sendRich(text)) return;
+  // `::: details` becomes an expandable blockquote here, so a message can
+  // collapse detail without giving up inline emphasis.
+  const html = detailsToHtml(stripModeMarkers(text), mdToTelegramHtml);
   for (const chunk of chunks(html, TG_MSG_LIMIT)) {
     try {
       await tg('sendMessage', { chat_id: CHAT_ID, text: chunk, parse_mode: 'HTML' });
