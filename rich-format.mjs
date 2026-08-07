@@ -42,7 +42,7 @@
 // message goes rich BECAUSE it found a table, and the HTML fallback has to find
 // the same one. Two copies of this predicate could disagree and route a message
 // to a renderer that then declines to draw the table that caused the routing.
-import { TABLE_SEP, isTableRow, splitCells } from './md-format.mjs';
+import { isTableSep, isTableRow, splitCells } from './md-format.mjs';
 
 // Telegram accepted size:1 in probing. Deeper levels are clamped rather than
 // guessed at — an unsupported size rejects the WHOLE message, and a heading
@@ -84,7 +84,7 @@ export function shouldUseRich(md) {
   // A real table needs a header row followed by a separator row.
   const lines = t.split('\n');
   for (let i = 0; i < lines.length - 1; i++) {
-    if (isTableRow(lines[i]) && TABLE_SEP.test(lines[i + 1])) return true;
+    if (isTableRow(lines[i]) && isTableSep(lines[i + 1])) return true;
   }
   return false;
 }
@@ -198,7 +198,7 @@ export function mdToRichBlocks(md, inlineHtml) {
     }
 
     // Table: header row, separator, then body rows
-    if (isTableRow(line) && lines[i + 1] !== undefined && TABLE_SEP.test(lines[i + 1])) {
+    if (isTableRow(line) && isTableSep(lines[i + 1])) {
       const header = splitCells(line);
       let j = i + 2;
       const body = [];

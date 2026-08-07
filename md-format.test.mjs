@@ -17,12 +17,13 @@ import {
   escHtml,
   stripHtml,
   isTableRow,
+  isTableSep,
   splitCells,
   renderMdTables,
   mdToTelegramHtml,
 } from './md-format.mjs';
 
-const M = { chunks, escHtml, stripHtml, isTableRow, splitCells, renderMdTables, mdToTelegramHtml };
+const M = { chunks, escHtml, stripHtml, isTableRow, isTableSep, splitCells, renderMdTables, mdToTelegramHtml };
 
 let pass = 0;
 const failures = [];
@@ -202,6 +203,23 @@ t('the size limit is the callers, not a module constant', () => {
   // or a caller with a smaller budget (rich blocks, a caption) silently overflows.
   for (const c of M.chunks('word '.repeat(500), 120)) ok(c.length <= 120, `chunk of ${c.length} ignored the limit`);
   eq(M.chunks('a'.repeat(10), 5).every((c) => c.length <= 5), true);
+});
+
+// ---------- isTableSep: the one definition both renderers share ----------
+// Regression: every pipe in TABLE_SEP is optional, so the regex alone matches a
+// bare `---`. rich-format.mjs used to test the raw regex and therefore routed
+// "| a | b |" + "---" to the rich path, while renderMdTables (which also required
+// a literal pipe) declined to draw it — a rich failure then dropped the table AND
+// the inline bold/code the rich path had already traded away.
+t('isTableSep accepts a piped separator', () => ok(isTableSep('|---|---|'), 'piped separator'));
+t('isTableSep accepts alignment colons', () => ok(isTableSep('|:--|--:|'), 'aligned separator'));
+t('isTableSep rejects a bare thematic break', () => ok(!isTableSep('---'), 'bare --- is not a separator'));
+t('isTableSep rejects prose containing a pipe', () => ok(!isTableSep('pick a | b'), 'prose'));
+t('isTableSep is safe on undefined (end of input)', () => ok(!isTableSep(undefined), 'undefined'));
+
+t('a bare --- after a table row is not a table', () => {
+  const src = '| a | b |\n---\n| 1 | 2 |';
+  eq(renderMdTables(src), src, 'left untouched');
 });
 
 // ---------- report ----------

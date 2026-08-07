@@ -253,5 +253,25 @@ const H = (s) => s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');  // stand-in conver
   eq('empty details produces nothing', out.trim(), '');
 }
 
+// ---------- routing must not promise a table the fallback won't draw ----------
+// shouldUseRich sends a message down the rich path BECAUSE it found a table,
+// paying for it with inline bold and code. If the HTML fallback then disagrees
+// about what a table is, a rich failure (or TG_RICH=0) costs the message both.
+// Both renderers now share isTableSep, so they agree on the separator rule.
+{
+  const { renderMdTables } = await import('./md-format.mjs');
+  const drawsTable = (src) => renderMdTables(src) !== src;
+
+  const realTable = '| a | b |\n|---|---|\n| 1 | 2 |';
+  ok('real table: rich routes it', shouldUseRich(realTable));
+  ok('real table: html fallback also draws it', drawsTable(realTable));
+
+  // The regression: TABLE_SEP's pipes are all optional, so a bare `---` matched
+  // the regex. rich routed on it; renderMdTables (which required a pipe) did not.
+  const thematicBreak = '| a | b |\n---\n| 1 | 2 |';
+  ok('bare --- : rich does not route it', !shouldUseRich(thematicBreak));
+  ok('bare --- : html does not draw it either', !drawsTable(thematicBreak));
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

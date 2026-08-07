@@ -29,10 +29,17 @@ export const stripHtml = (s) =>
 // the grid inside <pre>: a fixed-width grid only holds while every row fits the
 // screen, and on a phone a 3-column table almost never does — it wraps and the
 // columns scramble, which is worse than no table at all.
-// Exported because rich-format.mjs detects tables too, and the two renderers
-// must agree on what counts as one. Stateless (no /g flag), so sharing the
-// object across modules is safe.
-export const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
+// The ONE definition of "this line separates a table header from its body",
+// shared with rich-format.mjs so both renderers agree. Every pipe in TABLE_SEP
+// is optional, so the regex alone also matches a bare `---` — which after a
+// table row is a thematic break, not a separator. Requiring a literal pipe is
+// what distinguishes them, and it is why this is a function and not the raw
+// regex: three call sites previously spelled this rule three different ways,
+// and rich-format's looser two routed `| a | b |` + `---` to the rich path
+// while the HTML fallback declined to draw it — so a rich failure dropped both
+// the table AND the inline bold/code the rich path had already traded away.
+export const isTableSep = (l) => typeof l === 'string' && l.includes('|') && TABLE_SEP.test(l);
 // Require a LEADING pipe: without it any prose line containing "a | b" would be
 // read as a table row.
 export const isTableRow = (l) => /^\s*\|/.test(l) && /\|/.test(l);
@@ -51,7 +58,7 @@ export function renderMdTables(text) {
   for (let i = 0; i < lines.length; i++) {
     const sep = lines[i + 1];
     // header row, separator row, then one or more body rows
-    if (isTableRow(lines[i]) && sep !== undefined && sep.includes('|') && TABLE_SEP.test(sep)) {
+    if (isTableRow(lines[i]) && isTableSep(sep)) {
       const headers = splitCells(lines[i]);
       let j = i + 2;
       const rows = [];

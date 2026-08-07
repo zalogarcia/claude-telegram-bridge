@@ -31,10 +31,18 @@ case "$REPO_NAME" in
 esac
 SIBLING="${BRIDGE_SIBLING_REPO:-$DEFAULT_SIBLING}"
 
+# A file belongs here the moment both repos carry the same copy — test suites
+# included. A shared module whose TESTS are unenforced is only half-protected:
+# the tests are what say what the module must do, so letting them drift lets the
+# two repos disagree about correctness while the modules still match byte for
+# byte. rich-format/detached-workers/watchdog tests were identical but unlisted.
 SHARED_MODULES=(
   rich-format.mjs
+  rich-format.test.mjs
   schedule.mjs
   detached-workers.mjs
+  detached-workers.test.mjs
+  watchdog.test.mjs
   md-format.mjs
   md-format.test.mjs
   progress-render.mjs
