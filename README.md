@@ -223,8 +223,11 @@ touch .bridge-paused && launchctl bootout gui/$(id -u)/com.claude-telegram-bridg
 node bridge.mjs --selftest "Reply with exactly: OK"
 
 # unit tests (offline — never touch Telegram, never touch the live registry)
-node test.mjs                    # render/format helpers
-node rich-format.test.mjs        # Telegram HTML rendering
+node test.mjs                    # this repo's own bridge.mjs assertions
+node md-format.test.mjs          # markdown -> Telegram HTML, and safe chunking
+node progress-render.test.mjs    # the progress bubble
+node usage-limits.test.mjs       # plan limits, token counts, context windows
+node rich-format.test.mjs        # Bot API 10.2 rich blocks
 node detached-workers.test.mjs   # a worker must survive its daemon being killed
 node watchdog.test.mjs           # dead workers get reaped, live ones don't
 

@@ -16,6 +16,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import { mdToRichBlocks, chunkBlocks, shouldUseRich, stripModeMarkers, detailsToHtml } from './rich-format.mjs';
+import { chunks, escHtml, stripHtml, mdToTelegramHtml } from './md-format.mjs';
+import {
+  clip,
+  oneLine,
+  prettyPath,
+  summarizeToolInput,
+  toolEntry,
+  renderEntry,
+  renderTail,
+  quoteBlock,
+  thinkingWord,
+  fmtElapsed,
+  fmtAge,
+} from './progress-render.mjs';
+import { execJson, fmtTokens, readRateLimits, fmtLeft, fmtLimit, modelWindow } from './usage-limits.mjs';
 import {
   spawnWorker,
   tailLines,
@@ -201,38 +216,6 @@ async function tg(method, payload, attempt = 0, { retry429 = true } = {}) {
   return data.result;
 }
 
-// Split for Telegram's per-message limit WITHOUT cutting through an HTML tag.
-// A blind slice every `size` chars could land inside `<blockquote expandable>`
-// or between <b> and </b>; Telegram then rejects the chunk and the whole message
-// degrades to plain text, silently losing all formatting on long answers.
-// Prefer a newline boundary, fall back to a space, and only hard-cut when a
-// single line genuinely exceeds the limit (e.g. one enormous <pre> block).
-function chunks(text, size) {
-  const out = [];
-  let rest = text;
-  while (rest.length > size) {
-    const window = rest.slice(0, size);
-    let cut = window.lastIndexOf('\n');
-    if (cut < size * 0.5) cut = window.lastIndexOf(' '); // don't strand a tiny chunk
-    if (cut < size * 0.5) cut = size; // one unbroken run — hard-cut is the only option
-    // Never cut inside a tag: if the boundary sits after an unclosed '<', back
-    // up to it so the tag moves whole into the next chunk.
-    const open = window.slice(0, cut).lastIndexOf('<');
-    if (open > -1 && window.slice(open, cut).indexOf('>') === -1) cut = open;
-    // Backing up to `open` can land on 0 (an unclosed '<' at the very start of
-    // the window), which would push an empty chunk and leave `rest` untouched —
-    // a synchronous infinite loop that freezes the whole daemon. Never accept a
-    // non-advancing cut: take the hard cut instead. A tag split this way just
-    // makes Telegram reject that chunk, and the caller already falls back to
-    // plain text for it.
-    if (cut <= 0) cut = size;
-    out.push(rest.slice(0, cut));
-    rest = rest.slice(cut).replace(/^\n/, '');
-  }
-  if (rest) out.push(rest);
-  return out.length ? out : [''];
-}
-
 // Send text to the chat; tries HTML, falls back to plain on parse errors.
 // parse_mode:'Markdown' is what Telegram itself calls "a legacy mode, retained
 // for backward compatibility" — it can't express underline, strike, spoiler or
@@ -327,115 +310,7 @@ const THINKING_WORDS = [
 ];
 // Random start so back-to-back runs don't open on the same word, then step
 // sequentially so a single run never repeats until it has used them all.
-const thinkingWord = (i) => THINKING_WORDS[i % THINKING_WORDS.length];
 const WORD_HOLD_SEC = 12; // how long one word stays up — the knob to tune the pace
-
-// Truncate for display. ALWAYS marks the cut with an ellipsis — a clipped
-// string with no marker reads on the phone as a message that got lost in
-// transit rather than one deliberately previewed. Cuts on a word boundary when
-// one sits reasonably close to the limit (past 60% of the window), else hard.
-// Every user-visible truncation goes through here; never raw .slice() into a
-// send() — that is what made the bg-handoff ack look broken.
-const clip = (s, n) => {
-  const str = String(s);
-  if (str.length <= n) return str;
-  const head = str.slice(0, n - 1);
-  const sp = head.lastIndexOf(' ');
-  return (sp > n * 0.6 ? head.slice(0, sp) : head).trimEnd() + '…';
-};
-// Collapse newlines/runs of spaces so a multi-line agent prompt previews as one
-// readable line instead of dumping its raw formatting into the chat.
-const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
-
-// Absolute paths eat a whole phone line and the identifying part is the tail.
-// /home/you/src/my-project/inbox/photo.jpg -> …/inbox/photo.jpg
-function prettyPath(p) {
-  const s = String(p).startsWith(HOME) ? `~${String(p).slice(HOME.length)}` : String(p);
-  const parts = s.split('/');
-  return parts.length > 4 ? `…/${parts.slice(-2).join('/')}` : s;
-}
-
-function summarizeToolInput(input) {
-  if (!input || typeof input !== 'object') return '';
-  // `description` is written FOR a human — prefer it over every raw payload.
-  // A Bash `command` is shell scaffolding (echo banners, absolute paths, 2>&1)
-  // that reads as noise on a phone; an Agent `prompt` is enormous. Both carry a
-  // tidy description, so this one reorder is most of the readability win.
-  if (input.description) return clip(String(input.description).replace(/\s+/g, ' '), 70);
-  const file = input.file_path ?? input.notebook_path;
-  if (file) return clip(prettyPath(file), 70);
-  const pick = input.command ?? input.pattern ?? input.url ?? input.query ?? input.prompt;
-  if (pick == null) return '';
-  return clip(String(pick).replace(/\s+/g, ' '), 70);
-}
-
-const TOOL_EMOJI = {
-  Bash: '💻',
-  Read: '📖',
-  Write: '✏️',
-  Edit: '✏️',
-  MultiEdit: '✏️',
-  NotebookEdit: '📓',
-  Grep: '🔍',
-  Glob: '🔍',
-  WebSearch: '🌐',
-  WebFetch: '🌐',
-  TodoWrite: '📋',
-};
-
-function toolEntry(block, isSubagent) {
-  if (block.name === 'Task' || block.name === 'Agent') {
-    return {
-      kind: 'tool',
-      sub: isSubagent,
-      emoji: '🤖',
-      name: block.input?.subagent_type || 'agent',
-      arg: block.input?.description || '',
-    };
-  }
-  return {
-    kind: 'tool',
-    sub: isSubagent,
-    emoji: TOOL_EMOJI[block.name] || '🔧',
-    name: block.name,
-    arg: summarizeToolInput(block.input),
-  };
-}
-
-const escHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-function renderEntry(e, html) {
-  // Narration between tool calls is written for the final answer, not for a
-  // progress ticker — a full paragraph per step is what turns this into a wall.
-  if (e.kind === 'text') {
-    const t = clip(e.text.replace(/\s+/g, ' '), 140);
-    return html ? `<i>${escHtml(t)}</i>` : t;
-  }
-  const indent = e.sub ? '  ↳ ' : '';
-  // No <code> around the arg: these lines live inside a blockquote, and code/pre
-  // entities may not nest there — Telegram rejects the whole message.
-  if (html) return `${indent}${e.emoji} <b>${escHtml(e.name)}</b>${e.arg ? ` ${escHtml(e.arg)}` : ''}`;
-  return `${indent}${e.emoji} ${e.name}${e.arg ? ` ${e.arg}` : ''}`;
-}
-
-// The step log is reference material, not the message — collapse it behind
-// Telegram's expandable blockquote so the bubble stays one scannable header.
-// Only <b>/<i> go inside: the spec lets those nest in any entity, while <code>
-// and <pre> may not, and blockquotes can never nest.
-const quoteBlock = (body) => (body ? `\n<blockquote expandable>${body}</blockquote>` : '');
-
-// Newest-first fill so the tail always fits without slicing mid-HTML-tag.
-function renderTail(entries, html, maxChars) {
-  const out = [];
-  let len = 0;
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const line = renderEntry(entries[i], html);
-    if (len + line.length + 1 > maxChars) break;
-    out.unshift(line);
-    len += line.length + 1;
-  }
-  return out.join('\n');
-}
 
 // Edit a progress message with HTML formatting, falling back to plain text if
 // Telegram rejects the entity parse. "message is not modified" 400s are noise.
@@ -529,7 +404,7 @@ function runClaude(rawText, lane = LANES.main) {
         // cwd is the same string on nearly every run — it was pure noise here.
         // /status still reports it when it actually matters.
         text: liveProgress
-          ? `${lane.icon} ${thinkingWord(wordSeed)}…`
+          ? `${lane.icon} ${thinkingWord(wordSeed, THINKING_WORDS)}…`
           : `${lane.icon} Running in the background — the chat stays open.`,
       });
       progressMsgId = m.message_id;
@@ -661,7 +536,7 @@ function runClaude(rawText, lane = LANES.main) {
       // Keyed to elapsed TIME, not the render count — one word per tick flickered,
       // and tying it to ticks meant the rate drifted with the render cadence and
       // jumped after a rate-limit pause.
-      const word = thinkingWord(wordSeed + Math.floor(elapsed / WORD_HOLD_SEC));
+      const word = thinkingWord(wordSeed + Math.floor(elapsed / WORD_HOLD_SEC), THINKING_WORDS);
       const header = `<b>${lane.icon} ${word}…</b> · ${fmtElapsed(elapsed)}${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
       const body = quoteBlock(renderTail(recent, true, PROGRESS_TAIL));
       const htmlOut = `${header}${body}`.slice(0, TG_MSG_LIMIT);
@@ -725,7 +600,7 @@ function runClaude(rawText, lane = LANES.main) {
           if (block.type === 'text' && block.text?.trim()) {
             if (!isSubagent) progress.push({ kind: 'text', text: block.text.trim() }); // subagent prose is noise; their tool calls tell the story
           } else if (block.type === 'tool_use') {
-            const entry = toolEntry(block, isSubagent);
+            const entry = toolEntry(block, isSubagent, HOME);
             progress.push(entry);
             toolLines.push(entry);
             // Live gauge for /status — bg lanes get no live-updating bubble,
@@ -967,25 +842,6 @@ function matchArchive(archive, ref) {
     if (byId.length > 1) return { error: `ambiguous id prefix "${ref}"` };
   }
   return { error: `no chat named or matching "${ref}" — see /chats` };
-}
-
-// Elapsed run time for humans: 45s · 6m 19s · 1h 12m.
-function fmtElapsed(sec) {
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
-  const h = Math.floor(m / 60);
-  const rm = m % 60;
-  return rm ? `${h}h ${rm}m` : `${h}h`;
-}
-
-function fmtAge(ms) {
-  const m = Math.round(ms / 60000);
-  if (m < 60) return `${m}m`;
-  const h = Math.round(m / 60);
-  if (h < 48) return `${h}h`;
-  return `${Math.round(h / 24)}d`;
 }
 
 const COMPACT_MARKER = '[[BRIDGE-COMPACT]]';
@@ -1259,27 +1115,6 @@ function checkSchedules() {
   if (changed) saveSchedules(store);
 }
 
-function execJson(cmd, args, timeoutMs = 90_000) {
-  return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024, env: { ...process.env } }, (err, stdout) => {
-      if (err) return resolve(null);
-      try {
-        resolve(JSON.parse(stdout));
-      } catch {
-        resolve(null);
-      }
-    });
-  });
-}
-
-function fmtTokens(n) {
-  if (n == null) return 'n/a';
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return Math.round(n / 1e3) + 'k';
-  return String(n);
-}
-
 // Plan-limit % + reset clocks, as shown in the Claude Code terminal footer.
 // Claude Code feeds those numbers to the statusline command's stdin and nowhere
 // else — no CLI, no state file — and a headless bridge run has no statusline, so
@@ -1292,155 +1127,6 @@ function fmtTokens(n) {
 // resets_at is an absolute epoch, so "time left" stays exact however old the
 // read is; only the % can be stale, which is why the age gets surfaced.
 const RATE_LIMIT_CACHE = process.env.BRIDGE_RATE_LIMIT_CACHE || path.join(HOME, '.claude', 'cache', 'rate-limits.json');
-
-function readRateLimits() {
-  try {
-    const j = JSON.parse(readFileSync(RATE_LIMIT_CACHE, 'utf8'));
-    return j?.rate_limits ? j : null;
-  } catch {
-    return null;
-  }
-}
-
-// Matches the footer's units: hours+minutes under a day, days+hours over.
-function fmtLeft(resetsAt) {
-  const mins = Math.round((Number(resetsAt) * 1000 - Date.now()) / 60000);
-  if (!Number.isFinite(mins) || mins <= 0) return 'now';
-  const d = Math.floor(mins / 1440);
-  const h = Math.floor((mins % 1440) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  return h > 0 ? `${h}h ${mins % 60}m` : `${mins}m`;
-}
-
-// "37% used · 3h49m left" — either half is omitted if the window lacks it.
-function fmtLimit(win) {
-  if (!win) return null;
-  const bits = [];
-  if (typeof win.used_percentage === 'number') bits.push(`${Math.round(win.used_percentage)}% used`);
-  if (win.resets_at) bits.push(`${fmtLeft(win.resets_at)} left`);
-  return bits.length ? bits.join(' · ') : null;
-}
-
-// Context window by model family. Fable/Opus/Sonnet 5 run 1M by default
-// (per platform docs, verified 2026-07-24); Haiku and unknowns assume 200k.
-function modelWindow(name) {
-  const n = (name || '').toLowerCase();
-  if (/fable|mythos|opus|sonnet/.test(n)) return 1_000_000;
-  return 200_000;
-}
-
-// Telegram's HTML has NO table tag — its whole vocabulary is b/i/u/s/a/code/
-// pre/blockquote/span — so a markdown table used to reach the phone as raw pipe
-// soup with the |---|---| separator sitting there in plain sight.
-//
-// Reshaped into a titled block per row instead: first cell becomes the bold
-// heading, remaining cells become "column: value" lines. Chosen over rendering
-// the grid inside <pre>: a fixed-width grid only holds while every row fits the
-// screen, and on a phone a 3-column table almost never does — it wraps and the
-// columns scramble, which is worse than no table at all.
-const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-*:?\s*)*\|?\s*$/;
-// Require a LEADING pipe: without it any prose line containing "a | b" would be
-// read as a table row.
-const isTableRow = (l) => /^\s*\|/.test(l) && /\|/.test(l);
-// Split on unescaped pipes only, so a cell may contain a literal \| .
-const splitCells = (line) =>
-  line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split(/(?<!\\)\|/)
-    .map((c) => c.replace(/\\\|/g, '|').trim());
-
-function renderMdTables(text) {
-  const lines = text.split('\n');
-  const out = [];
-  for (let i = 0; i < lines.length; i++) {
-    const sep = lines[i + 1];
-    // header row, separator row, then one or more body rows
-    if (isTableRow(lines[i]) && sep !== undefined && sep.includes('|') && TABLE_SEP.test(sep)) {
-      const headers = splitCells(lines[i]);
-      let j = i + 2;
-      const rows = [];
-      while (j < lines.length && isTableRow(lines[j])) rows.push(splitCells(lines[j++]));
-      if (rows.length) {
-        for (const cells of rows) {
-          const title = cells[0] || '';
-          // Bold markdown inside the cell already produced <b>; don't nest it.
-          if (title) out.push(title.includes('<b>') ? title : `<b>${title}</b>`);
-          for (let k = 1; k < cells.length; k++) {
-            const v = cells[k];
-            if (!v) continue; // empty cell — the column doesn't apply to this row
-            const h = headers[k];
-            out.push(h ? `· <i>${h}</i>: ${v}` : `· ${v}`);
-          }
-          out.push('');
-        }
-        i = j - 1;
-        continue;
-      }
-    }
-    out.push(lines[i]);
-  }
-  return out.join('\n');
-}
-
-// Convert Claude's markdown replies to Telegram-HTML (headers→bold, fences→pre,
-// inline code, links, bullets, tables). Code spans are extracted first so no
-// transform touches their contents. Sender falls back to plain on a parse reject.
-function mdToTelegramHtml(md) {
-  const fences = [];
-  // Keep the fence language — Telegram syntax-highlights <pre><code class="language-x">.
-  let t = md.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    const body = escHtml(code.replace(/\n$/, ''));
-    fences.push(lang ? `<pre><code class="language-${escHtml(lang)}">${body}</code></pre>` : `<pre>${body}</pre>`);
-    return `\u0000${fences.length - 1}\u0000`;
-  });
-  const inline = [];
-  t = t.replace(/`([^`\n]+)`/g, (_, code) => {
-    inline.push(`<code>${escHtml(code)}</code>`);
-    return `\u0001${inline.length - 1}\u0001`;
-  });
-  t = escHtml(t);
-  t = t.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
-  t = t.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
-  // Italic runs AFTER bold so ** is already consumed. Only *…* — underscores
-  // would eat snake_case identifiers in prose. The delimiters must hug
-  // non-space, per CommonMark: without that, prose like "3 * 4 and 2 * 5" pairs
-  // two unrelated asterisks and italicises everything between them, and a
-  // bullet ending in '*' turns into emphasis instead of a list item.
-  t = t.replace(/(^|[\s(])\*(\S(?:[^*\n]*\S)?)\*(?=$|[\s.,;:!?)])/g, '$1<i>$2</i>');
-  // A " inside the URL would break out of the href attribute; &quot; is one of
-  // the four named entities Telegram accepts.
-  t = t.replace(
-    /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-    (_, label, href) => `<a href="${href.replace(/"/g, '&quot;')}">${label}</a>`,
-  );
-  // After bold/italic/links so cell contents keep their inline formatting, and
-  // before the bullet rule — table rows start with '|', never '-', so neither
-  // transform can eat the other's input.
-  t = renderMdTables(t);
-  t = t.replace(/^(\s*)[-*]\s+/gm, '$1• ');
-  // Markdown "> quote" — escHtml already turned the marker into &gt;.
-  // Consecutive quoted lines collapse into ONE blockquote (they can't nest).
-  t = t.replace(/(?:^&gt;[ \t]?.*(?:\n|$))+/gm, (blk) => {
-    const body = blk
-      .replace(/\n$/, '')
-      .split('\n')
-      .map((l) => l.replace(/^&gt;[ \t]?/, ''))
-      .join('\n');
-    return `<blockquote>${body}</blockquote>\n`;
-  });
-  t = t.replace(/\u0001(\d+)\u0001/g, (_, i) => inline[i]);
-  t = t.replace(/\u0000(\d+)\u0000/g, (_, i) => fences[i]);
-  return t;
-}
-
-const stripHtml = (s) =>
-  s
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
 
 // Final results go out formatted; a chunk Telegram can't parse (e.g. a tag cut
 // by the chunk boundary) degrades to plain text for that chunk only.
@@ -1504,7 +1190,7 @@ async function gatherContext(st) {
   const lines = [`🧠 Bridge session context: ${ctx}`];
 
   // Plan limits first — they're the numbers that decide whether to keep going.
-  const rl = readRateLimits();
+  const rl = readRateLimits(RATE_LIMIT_CACHE);
   const fiveH = fmtLimit(rl?.rate_limits?.five_hour);
   const sevenD = fmtLimit(rl?.rate_limits?.seven_day);
   const active = blocks?.blocks?.find((b) => b.isActive);
@@ -1689,7 +1375,7 @@ async function handleCommand(text) {
       const lines = entries.map(([id, e]) => {
         const cur = id === st.sessionId ? '⭐ ' : '• ';
         const nm = e.name ? `${e.name}` : '(unnamed)';
-        const dir = e.cwd ? prettyPath(e.cwd) : '';
+        const dir = e.cwd ? prettyPath(e.cwd, HOME) : '';
         const tok = e.tokens ? ` · ${fmtTokens(e.tokens)}` : '';
         return `${cur}${nm} — ${id.slice(0, 8)} · ${fmtAge(Date.now() - (e.at || 0))} ago · ${dir}${tok}`;
       });

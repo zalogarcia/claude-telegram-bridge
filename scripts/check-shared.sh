@@ -35,6 +35,12 @@ SHARED_MODULES=(
   rich-format.mjs
   schedule.mjs
   detached-workers.mjs
+  md-format.mjs
+  md-format.test.mjs
+  progress-render.mjs
+  progress-render.test.mjs
+  usage-limits.mjs
+  usage-limits.test.mjs
 )
 
 if [ ! -d "$SIBLING" ]; then
