@@ -222,8 +222,14 @@ touch .bridge-paused && launchctl bootout gui/$(id -u)/com.claude-telegram-bridg
 # one-shot test through the real message handler
 node bridge.mjs --selftest "Reply with exactly: OK"
 
-# unit tests for the render/format helpers (offline — never touches Telegram)
-node test.mjs
+# unit tests (offline — never touch Telegram, never touch the live registry)
+node test.mjs                    # render/format helpers
+node rich-format.test.mjs        # Telegram HTML rendering
+node detached-workers.test.mjs   # a worker must survive its daemon being killed
+node watchdog.test.mjs           # dead workers get reaped, live ones don't
+
+# check the modules shared with the private sibling repo have not drifted
+BRIDGE_SIBLING_REPO=/path/to/sibling ./scripts/check-shared.sh
 
 # uninstall (add --purge to also delete config, state and schedules)
 ./uninstall.sh
@@ -233,8 +239,23 @@ node test.mjs
 `defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `timeoutMs` (chat lane, default
 30 min), `bgTimeoutMs` (background workers, default 8h — that lane is for
 hour-scale jobs), `staleSec` (skip messages older than this — default 1h, so a
-sleeping laptop doesn't wake to a backlog). Every key can be overridden with a
-`BRIDGE_<UPPER_SNAKE>` environment variable.
+sleeping laptop doesn't wake to a backlog), plus the detached-worker tunables
+`bgTailMs` (how often a worker's log is polled, default 300ms), `reattachPollMs`
+(liveness probe for a worker that outlived a restart, default 5s),
+`runLogMaxAgeDays` (run-log retention, default 7) and `inflightFile` (where the
+live-worker registry lives — empty means next to `bridge.mjs`). Every key can be
+overridden with a `BRIDGE_<UPPER_SNAKE>` environment variable.
+
+**Background workers outlive the daemon.** A background job is spawned
+*detached*, in its own process group, with stdout/stderr going to a file in
+`runs/` rather than a pipe. All three matter: a child in the daemon's group takes
+every signal aimed at the daemon, and a child whose stdout is a pipe dies on its
+next write once the daemon is gone — detaching alone does not save it. Each live
+worker is recorded in `bg-inflight.json`, so on the next boot the daemon
+re-attaches to workers that are still running and reports the ones that died
+without delivering. `safe-restart.sh` reads that same registry and refuses to
+force a restart while real background work is in flight. See
+`detached-workers.mjs` for the full reasoning.
 
 ## Caveats
 

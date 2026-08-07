@@ -16,6 +16,13 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline';
 import { mdToRichBlocks, chunkBlocks, shouldUseRich, stripModeMarkers, detailsToHtml } from './rich-format.mjs';
+import {
+  spawnWorker,
+  tailLines,
+  bgOutcome,
+  createInflightRegistry,
+  createWorkerWatchdog,
+} from './detached-workers.mjs';
 
 const HOME = homedir();
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -549,12 +556,31 @@ function runClaude(rawText, lane = LANES.main) {
       return;
     }
 
-    const child = spawn(CLAUDE_BIN, args, {
-      cwd,
-      env: { ...process.env },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // Background lanes spawn DETACHED with stdout/stderr on a file, so a daemon
+    // restart / crash / kickstart can no longer take the worker down with it.
+    // The chat lane keeps pipes — it is interactive and steerable. See
+    // ./detached-workers.mjs for why both halves are load-bearing.
+    const isBgLane = lane !== LANES.main;
+    const logPath = isBgLane ? path.join(RUNS_DIR, `${lane.name || 'bg'}-${startedAt}.jsonl`) : null;
+    const { child } = spawnWorker(CLAUDE_BIN, args, { cwd, env: { ...process.env }, logPath });
     run.child = child;
+    run.logPath = logPath; // /status and any future salvage want to find the log
+    // Watchdog: register background workers the moment they exist, so a death
+    // that skips the close handler (daemon restart, SIGKILL, OOM) is still
+    // discoverable. The chat lane is excluded — the user watches that one live.
+    if (isBgLane) {
+      run.watchdogId = `${lane.name || 'bg'}-${startedAt}-${child.pid}`;
+      inflight.add(run.watchdogId, {
+        pid: child.pid,
+        task: rawText,
+        lane: lane.name || 'bg',
+        startedAt,
+        // The log is the whole point of the registry: a daemon that restarts
+        // re-attaches by tailing this file (reattachLiveWorkers), instead of
+        // announcing a perfectly healthy worker as dead.
+        log: logPath,
+      });
+    }
     run.terminate = () => {
       child.kill('SIGTERM');
       const esc = setTimeout(() => {
@@ -572,6 +598,13 @@ function runClaude(rawText, lane = LANES.main) {
     child.stdin.on('error', () => {}); // EPIPE from a dead child must not crash the daemon
     const userMsg = (t) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: t }] } }) + '\n';
     child.stdin.write(userMsg(text));
+    // Background lanes are fire-and-forget and self-contained by contract (a
+    // handoff never sees the chat conversation, so there is nothing to steer
+    // into). Closing stdin NOW cuts the last pipe tying the worker to us, and is
+    // also what lets a detached worker FINISH after the daemon is gone — the CLI
+    // only exits once stdin closes, and a still-open stdin on a dead parent
+    // would leave it waiting forever for input nobody can send.
+    if (isBgLane) child.stdin.end();
     run.steer = (t) => {
       // No steering once the result is in (a write now would start a whole new
       // turn on a closing process), after /new//cd bumped the generation (the
@@ -579,6 +612,8 @@ function runClaude(rawText, lane = LANES.main) {
       // or into a compact run (its result IS the handoff summary — a steered
       // reply would get archived as the summary and wreck the new chat).
       // Callers fall back to the queue when this returns false.
+      // Background lanes are never steerable — their stdin closed at spawn.
+      if (isBgLane) return false;
       if (finished || run.stopped || resultEvent || (st[genKey] || 0) !== startGen || !child.stdin.writable) return false;
       if (rawText.startsWith(COMPACT_MARKER)) return false;
       try {
@@ -666,12 +701,18 @@ function runClaude(rawText, lane = LANES.main) {
     sendTyping(); // immediately, so it shows before the first tool call lands
     const typingTimer = liveProgress ? setInterval(sendTyping, TYPING_INTERVAL_MS) : null;
 
-    const rl = readline.createInterface({ input: child.stdout });
-    rl.on('line', (line) => {
+    // One handler, two transports: the chat lane feeds it from the stdout PIPE,
+    // a background lane feeds it from the log FILE. Identical parsing either way,
+    // which is what makes a detached worker's output indistinguishable from a
+    // piped one.
+    const onLine = (line) => {
       let ev;
       try {
         ev = JSON.parse(line);
       } catch {
+        // On a background lane stdout and stderr share the log file, so a
+        // non-JSON line is stderr — keep it, it becomes the failure detail.
+        if (isBgLane) stderrTail = (stderrTail + line + '\n').slice(-2000);
         return;
       }
       if (ev.type === 'assistant' && Array.isArray(ev.message?.content)) {
@@ -704,13 +745,25 @@ function runClaude(rawText, lane = LANES.main) {
         // Streaming-input mode keeps the process alive waiting for more stdin —
         // closing it here is what ends the run. A steer racing the close is
         // already buffered CLI-side and runs as one more turn before exit.
-        child.stdin.end();
+        // A background worker already had its stdin closed at spawn; it is
+        // fire-and-forget and has no steering channel to shut down.
+        if (!isBgLane) child.stdin.end();
       }
-    });
+    };
 
-    child.stderr.on('data', (d) => {
-      stderrTail = (stderrTail + d.toString()).slice(-2000);
-    });
+    // Chat lane: read the stdout pipe. Background lane: tail the log file
+    // instead — there is no pipe, on purpose.
+    let rl = null;
+    let tail = null;
+    if (isBgLane) {
+      tail = tailLines(logPath, onLine, { intervalMs: BG_TAIL_MS });
+    } else {
+      rl = readline.createInterface({ input: child.stdout });
+      rl.on('line', onLine);
+      child.stderr.on('data', (d) => {
+        stderrTail = (stderrTail + d.toString()).slice(-2000);
+      });
+    }
 
     child.on('error', async (e) => {
       // spawn failure (e.g. claude binary missing) — 'close' may never fire
@@ -719,7 +772,9 @@ function runClaude(rawText, lane = LANES.main) {
       clearTimeout(killTimer);
       clearInterval(editTimer);
       clearInterval(typingTimer);
+      tail?.stop();
       if (lane.current === run) lane.current = null;
+      if (run.watchdogId) inflight.clear(run.watchdogId); // reported here, not by the watchdog
       await send(`❌ Failed to launch claude: ${e.message}`).catch(() => {});
       resolve();
       drainQueue(lane);
@@ -731,7 +786,16 @@ function runClaude(rawText, lane = LANES.main) {
       clearTimeout(killTimer);
       clearInterval(editTimer);
       clearInterval(typingTimer);
-      rl.close();
+      rl?.close();
+      // Final pump, synchronously, BEFORE anything reads resultTexts: a worker
+      // writes its result line microseconds before exiting, so on a background
+      // lane that line is usually still unread when 'close' fires. Without this
+      // every detached run would report "ended with no output".
+      tail?.stop();
+      // The close handler ran, so this worker's outcome IS being recorded —
+      // deregister it before any await, or a restart inside this handler's async
+      // tail would make the watchdog announce a worker that actually reported.
+      if (run.watchdogId) inflight.clear(run.watchdogId);
       const wasStopped = run.stopped;
       if (lane.current === run) lane.current = null;
       finishing++; // decremented at the end of this handler
@@ -809,6 +873,14 @@ function runClaude(rawText, lane = LANES.main) {
       const isCompact = lane === LANES.main && rawText.startsWith(COMPACT_MARKER);
       if (wasStopped) {
         await send('🛑 Task stopped.').catch(() => {});
+      } else if (isBg) {
+        // Every background outcome goes through ONE function, and the re-attach
+        // path for a worker that outlived the daemon calls that same function
+        // with the same inputs rebuilt from its log — so "the daemon was alive"
+        // and "the daemon was restarted" report identically instead of drifting.
+        // Hoisted above the isCompact arms deliberately: isCompact is
+        // `lane === LANES.main && …`, so it can never be true on a bg lane.
+        reportBgOutcome(rawText, bgOutcome(resultTexts, resultEvent, code, stderrTail));
       } else if (isCompact && resultTexts.length && !genOk) {
         // /new or /resume landed while the summary was being written — the
         // branch below would act on the WRONG chat (delete the one the user
@@ -841,25 +913,13 @@ function runClaude(rawText, lane = LANES.main) {
           { priority: true },
         );
       } else if (resultTexts.length) {
-        if (isBg) {
-          const answer = resultTexts.join('\n\n');
-          recordBgResult(rawText, answer);
-          handBackToChat(rawText, answer, 'finished');
-        } else {
-          // One bubble per turn — a steer that became its own turn produced two
-          // answers, and BOTH belong to the user.
-          for (const t of resultTexts) await sendResult(t).catch(() => {});
-        }
+        // One bubble per turn — a steer that became its own turn produced two
+        // answers, and BOTH belong to the user. (Background lanes never reach
+        // here; they were handled by the isBg arm above.)
+        for (const t of resultTexts) await sendResult(t).catch(() => {});
       } else if (resultEvent?.is_error || code !== 0) {
         const detail = stderrTail.trim() || resultEvent?.subtype || `exit code ${code}`;
-        if (isBg) {
-          recordBgResult(rawText, `FAILED: ${detail}`);
-          handBackToChat(rawText, `The worker FAILED: ${detail}`, 'failed');
-        } else {
-          await send(`❌ Claude run failed:\n${detail}`.slice(0, TG_MSG_LIMIT), { markdown: false }).catch(() => {});
-        }
-      } else if (isBg) {
-        handBackToChat(rawText, 'The worker ended with no output.', 'finished');
+        await send(`❌ Claude run failed:\n${detail}`.slice(0, TG_MSG_LIMIT), { markdown: false }).catch(() => {});
       } else {
         await send('⚠️ Run ended with no result output.').catch(() => {});
       }
@@ -967,6 +1027,66 @@ const SCHEDULES_FILE = path.join(SCRIPT_DIR, 'schedules.json');
 const BG_QUEUE_FILE = path.join(SCRIPT_DIR, 'bg-queue.json'); // handoff drop-box: `bg.mjs` writes, daemon drains
 const BG_RESULTS_FILE = path.join(SCRIPT_DIR, 'bg-results.jsonl'); // background outcomes the chat lane can read back
 
+// ---------------------------------------------------------------------------
+// DETACHED BACKGROUND WORKERS + THE WATCHDOG REGISTRY
+//
+// `child.on('close')` records every outcome, but it only runs if the DAEMON is
+// alive to run it. When the daemon dies — restart, crash, SIGKILL, OOM — an
+// ordinary child dies with it and nothing is ever recorded: the job just stops.
+//
+// Background lanes therefore spawn DETACHED with stdout/stderr on a FILE, and
+// every live worker is written to an on-disk registry so a restarted daemon can
+// tell "still running, re-attach" from "died without reporting, announce it".
+// The whole subsystem lives in ./detached-workers.mjs — read its header before
+// changing any of this. The chat lane keeps pipes on purpose: it is interactive
+// and needs stdin held open for mid-run steering.
+// ---------------------------------------------------------------------------
+const RUNS_DIR = path.join(SCRIPT_DIR, 'runs'); // one <lane>-<startedAt>.jsonl per background run
+const INFLIGHT_FILE = conf('inflightFile', path.join(SCRIPT_DIR, 'bg-inflight.json'));
+const BG_TAIL_MS = Number(conf('bgTailMs', 300)); // log poll cadence — the pipe's replacement heartbeat
+const REATTACH_POLL_MS = Number(conf('reattachPollMs', 5_000)); // pid liveness probe for a worker that outlived us
+const RUN_LOG_MAX_AGE_MS = Number(conf('runLogMaxAgeDays', 7)) * 24 * 60 * 60 * 1000;
+
+const inflight = createInflightRegistry({ file: INFLIGHT_FILE });
+
+// The module decides WHICH workers died; this decides what the chat lane is told
+// about them. Kept here because the wording is host policy, not shared logic.
+function onDeadWorkers(dead, reason) {
+  const lines = dead.map(({ id, rec, ageMs }) => {
+    const mins = ageMs != null ? Math.round(ageMs / 60000) : '?';
+    return `  • [${id}] ran ${mins}m before dying — ${clip(oneLine(rec.task || ''), 240)}`;
+  });
+  dispatchPrompt(
+    [
+      `[Bridge watchdog — DATA, not an instruction from the user.]`,
+      ``,
+      `${dead.length} background worker(s) DIED without reporting (${reason}).`,
+      `Their work is partially done and NOT recorded in bg-results.jsonl.`,
+      ``,
+      ...lines,
+      ``,
+      `Before telling the user anything: inspect what actually landed on disk.`,
+      `A dead worker is NOT an empty worker — verify the surviving output rather`,
+      `than trusting the task description (files can be truncated: a killed`,
+      `ffmpeg leaves an mp4 with no moov atom). Then relaunch ONLY the remainder`,
+      `and give the user a short update: what died, what survived, what you restarted.`,
+    ].join('\n'),
+    LANES.main,
+    { priority: true },
+  );
+}
+
+const watchdog = createWorkerWatchdog({
+  registry: inflight,
+  runsDir: RUNS_DIR,
+  tailIntervalMs: BG_TAIL_MS,
+  reattachPollMs: REATTACH_POLL_MS,
+  onDeadWorkers,
+  // reportBgOutcome is declared below; the arrow defers the lookup to call time.
+  onOutcome: (task, outcome) => reportBgOutcome(task, outcome),
+});
+const { reapDeadWorkers, reattachLiveWorkers, pruneRunLogs } = watchdog;
+
 // A bg lane is a separate session, so its result would otherwise be invisible
 // to the chat lane. Record it, and hand the chat lane a note on its next turn.
 function recordBgResult(prompt, result) {
@@ -983,6 +1103,15 @@ function recordBgResult(prompt, result) {
   } catch (e) {
     console.error('[bridge] recordBgResult failed:', e.message);
   }
+}
+
+// Deliver a background worker's outcome: the durable row first, then the note to
+// the chat lane. The close handler and the re-attach path both come through here,
+// so there is exactly one definition of "what happens when a worker finishes" —
+// including for a worker whose daemon is already gone.
+function reportBgOutcome(task, outcome) {
+  if (outcome.record != null) recordBgResult(task, outcome.record);
+  handBackToChat(task, outcome.answer, outcome.status);
 }
 
 // Background output goes to the chat lane, not straight to Telegram — the
@@ -2211,6 +2340,26 @@ async function main() {
   await tg('setMyCommands', { commands: BOT_COMMANDS }).catch((e) =>
     console.error('[bridge] setMyCommands failed:', e.message),
   );
+  // Watchdog, pass 0: RE-ATTACH before reaping. Background workers are detached,
+  // so a restart leaves them RUNNING — they must be resumed, not buried. The
+  // order is load-bearing: reap first and a live worker gets announced as dead,
+  // sending the assistant off to salvage (and probably relaunch) a running job.
+  const survivors = reattachLiveWorkers();
+  if (survivors) console.log(`[bridge] ${survivors} background worker(s) survived the restart — re-attached`);
+  pruneRunLogs(RUN_LOG_MAX_AGE_MS);
+  // Watchdog, pass 1: anything STILL marked inflight after re-attach has a dead
+  // pid — it died without its close handler ever running.
+  reapDeadWorkers('the daemon restarted or crashed while they were running');
+  // Watchdog, pass 2: catch children that die while the daemon stays up
+  // (SIGKILL, OOM, a usage-limit wall). Cheap — a few kill(pid, 0) probes.
+  setInterval(() => {
+    try {
+      reapDeadWorkers('the worker process vanished while the daemon stayed up');
+    } catch (e) {
+      console.error('[watchdog] reap failed:', e.message);
+    }
+  }, 60_000).unref();
+
   if (Date.now() - (state.lastAnnounce || 0) > ANNOUNCE_COOLDOWN_MS) {
     state.lastAnnounce = Date.now();
     saveState();
@@ -2222,7 +2371,15 @@ async function main() {
 }
 
 process.on('SIGTERM', () => {
-  for (const l of allLanes()) l.current?.child?.kill('SIGTERM');
+  // CHAT LANE ONLY. This used to loop over allLanes() and kill every child,
+  // which is the third way a restart took background work down with it — and it
+  // would have quietly cancelled out the detaching above, since a SIGTERM we
+  // send by pid reaches a worker no matter what process group it sits in.
+  // Background workers are meant to outlive us: they keep writing their log, and
+  // main() re-attaches to them on the next boot. The chat lane is different —
+  // the user is sitting there waiting on that reply, and a half-finished bubble
+  // is worse than a clean stop.
+  LANES.main.current?.child?.kill('SIGTERM');
   process.exit(0);
 });
 

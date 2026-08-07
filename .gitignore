@@ -4,6 +4,8 @@ state.json
 schedules.json
 bg-queue.json
 bg-results.jsonl
+bg-inflight.json
+runs/
 heartbeat
 .bridge-paused
 .watchdog-strike

@@ -14,6 +14,11 @@
   "bgTimeoutMs": 28800000,
   "staleSec": 3600,
 
+  "bgTailMs": 300,
+  "reattachPollMs": 5000,
+  "runLogMaxAgeDays": 7,
+  "inflightFile": "",
+
   "_comments": {
     "defaultCwd": "Where sessions start. Empty = ~/dev if it exists, else $HOME.",
     "claudeBin": "Path to the claude CLI. Empty = auto-detect.",
@@ -24,6 +29,10 @@
     "timeoutMs": "Kill a CHAT-lane task after this long. Default 30 minutes — you're waiting on the reply.",
     "bgTimeoutMs": "Kill a BACKGROUND worker after this long. Default 8 hours — that lane is for hour-scale jobs.",
     "staleSec": "Ignore messages older than this (e.g. queued while the machine slept). Default 1 hour.",
+    "bgTailMs": "How often the daemon polls a detached worker's log file, in ms. This replaces the stdout pipe. Default 300.",
+    "reattachPollMs": "How often to check whether a worker that outlived a daemon restart has exited, in ms. Default 5000.",
+    "runLogMaxAgeDays": "Delete background run logs older than this at startup. Logs still named by a live worker are kept. Default 7.",
+    "inflightFile": "Path to the live-worker registry. Empty = bg-inflight.json next to bridge.mjs. Only change it if the bridge directory is read-only.",
     "openaiApiKey": "Optional. For Whisper voice-note transcription. Usually better set as $OPENAI_API_KEY.",
     "env-override": "Any key can be overridden with BRIDGE_<UPPER_SNAKE_CASE>, e.g. BRIDGE_DEFAULT_CWD."
   }
