@@ -1,5 +1,12 @@
 // node rich-format.test.mjs
-import { mdToRichBlocks, chunkBlocks, shouldUseRich, stripModeMarkers, detailsToHtml } from './rich-format.mjs';
+import {
+  mdToRichBlocks,
+  chunkBlocks,
+  shouldUseRich,
+  stripModeMarkers,
+  detailsToHtml,
+  splitCodeRuns,
+} from './rich-format.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -272,6 +279,69 @@ const H = (s) => s.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');  // stand-in conver
   ok('bare --- : rich does not route it', !shouldUseRich(thematicBreak));
   ok('bare --- : html does not draw it either', !drawsTable(thematicBreak));
 }
+
+// ---------- fenced code must SURVIVE the rich path ----------
+// The regression this covers: a fence became {type:'paragraph'} with the
+// backticks stripped, so a message containing a table (which is every message
+// that routes here) reached the owner with no code block in it at all — and so
+// nothing for the clients to hang a copy affordance on.
+eq(
+  'fence is its own block, not a paragraph',
+  mdToRichBlocks('```\nnpm test\n```'),
+  [{ type: 'code', lang: '', text: 'npm test' }],
+);
+
+eq(
+  'fence keeps its language hint',
+  mdToRichBlocks('```bash\nnpm ci && npm test\n```'),
+  [{ type: 'code', lang: 'bash', text: 'npm ci && npm test' }],
+);
+
+eq(
+  'multi-line fence keeps its line breaks and indentation',
+  mdToRichBlocks('```js\nif (a) {\n  b();\n}\n```'),
+  [{ type: 'code', lang: 'js', text: 'if (a) {\n  b();\n}' }],
+);
+
+// The real shape: a table is what sends a message down this path, and the fence
+// has to come out the other side intact next to it.
+{
+  const blocks = mdToRichBlocks('| a | b |\n|---|---|\n| 1 | 2 |\n\nRun:\n\n```sh\nls -la\n```\n');
+  eq('table message keeps its code block', blocks.map((b) => b.type), ['table', 'paragraph', 'code']);
+}
+
+// An unprobed type nested inside a rich block would reject the WHOLE message,
+// so nested fences stay paragraphs — the old behaviour, now scoped to the rare
+// case instead of every message.
+{
+  const det = mdToRichBlocks('::: details Logs\n```\nboom\n```\n:::');
+  eq('nested fence stays a paragraph', det, [
+    { type: 'details', summary: 'Logs', blocks: [{ type: 'paragraph', text: 'boom' }] },
+  ]);
+  const quote = mdToRichBlocks('> ```\n> boom\n> ```');
+  eq('quoted fence stays a paragraph', quote, [
+    { type: 'blockquote', blocks: [{ type: 'paragraph', text: 'boom' }] },
+  ]);
+}
+
+// ---------- splitCodeRuns: code never reaches sendRichMessage ----------
+{
+  const blocks = mdToRichBlocks('# H\n\n```sh\nls\n```\n\ntail text');
+  const runs = splitCodeRuns(blocks);
+  eq('runs alternate in source order', runs.map((r) => (r.code ? 'code' : 'rich')), ['rich', 'code', 'rich']);
+  eq('code run carries the block', runs[1].code, { type: 'code', lang: 'sh', text: 'ls' });
+  ok(
+    'no code block ever reaches the rich chunker',
+    runs.every((r) => !r.rich || r.rich.every((b) => b.type !== 'code')),
+  );
+  eq('surrounding blocks keep their order', runs[0].rich[0].type, 'heading');
+}
+
+eq('splitCodeRuns on code-only input', splitCodeRuns([{ type: 'code', lang: '', text: 'x' }]).length, 1);
+eq('splitCodeRuns on rich-only input', splitCodeRuns([{ type: 'paragraph', text: 'x' }]), [
+  { rich: [{ type: 'paragraph', text: 'x' }] },
+]);
+eq('splitCodeRuns on nothing', splitCodeRuns([]), []);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

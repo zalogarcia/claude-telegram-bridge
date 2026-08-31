@@ -21,6 +21,9 @@ import {
   splitCells,
   renderMdTables,
   mdToTelegramHtml,
+  codeHtml,
+  copyButtonFor,
+  COPY_TEXT_LIMIT,
 } from './md-format.mjs';
 
 const M = { chunks, escHtml, stripHtml, isTableRow, isTableSep, splitCells, renderMdTables, mdToTelegramHtml };
@@ -220,6 +223,84 @@ t('isTableSep is safe on undefined (end of input)', () => ok(!isTableSep(undefin
 t('a bare --- after a table row is not a table', () => {
   const src = '| a | b |\n---\n| 1 | 2 |';
   eq(renderMdTables(src), src, 'left untouched');
+});
+
+// ---------- code blocks: <pre> is the copy affordance ----------
+// The clients make a <pre> block copyable at ANY length, which is why the block
+// matters more than the 256-char button below.
+t('codeHtml keeps the language hint', () => {
+  eq(codeHtml('npm ci', 'bash'), '<pre><code class="language-bash">npm ci</code></pre>');
+});
+
+t('codeHtml without a language is a bare pre', () => {
+  eq(codeHtml('npm ci', ''), '<pre>npm ci</pre>');
+});
+
+t('codeHtml escapes the body and the language', () => {
+  eq(codeHtml('a && b < c', ''), '<pre>a &amp;&amp; b &lt; c</pre>');
+  ok(!codeHtml('x', 'j"s<').includes('<'.repeat(1) + 'script'), 'lang is escaped');
+  eq(codeHtml('x', 'a<b'), '<pre><code class="language-a&lt;b">x</code></pre>');
+});
+
+t('mdToTelegramHtml still renders a fence as pre', () => {
+  eq(mdToTelegramHtml('```bash\nnpm ci\n```'), '<pre><code class="language-bash">npm ci</code></pre>');
+});
+
+// A fence longer than one message used to be hard-cut, leaving chunk N with an
+// unclosed <pre> and chunk N+1 with a stray closer — Telegram rejects both and
+// sendResult degrades them to plain text, so the LONGEST snippets were exactly
+// the ones that arrived with no code block at all.
+t('a fence bigger than a message splits into whole, closed pre blocks', () => {
+  const code = Array.from({ length: 400 }, (_, i) => `line ${i}: const x${i} = ${i};`).join('\n');
+  const html = mdToTelegramHtml(`Before.\n\n\`\`\`js\n${code}\n\`\`\`\n\nAfter.`);
+  const parts = chunks(html, 4096, { closePre: true });
+  ok(parts.length > 1, 'fixture must actually split');
+  for (const p of parts) {
+    ok(p.length <= 4096, `chunk over the limit: ${p.length}`);
+    eq((p.match(/<pre>/g) || []).length, (p.match(/<\/pre>/g) || []).length, 'unbalanced <pre>');
+    eq((p.match(/<code[^>]*>/g) || []).length, (p.match(/<\/code>/g) || []).length, 'unbalanced <code>');
+  }
+  // Every source line still arrives, and each reopened block keeps the language.
+  const body = parts.join('').replace(/<\/?(?:pre|code)[^>]*>/g, '');
+  ok(body.includes('line 0:') && body.includes('line 399:'), 'code content survived');
+  eq(parts.filter((p) => p.includes('class="language-js"')).length, parts.filter((p) => p.includes('<pre>')).length);
+});
+
+// The size limit is Telegram's, so it outranks keeping the block open: when the
+// tags cannot fit the budget, chunks() degrades instead of overshooting.
+t('closePre never emits a chunk over the limit, even at absurd sizes', () => {
+  const html = codeHtml('a\n'.repeat(200), 'typescript');
+  for (const size of [20, 40, 64, 100, 500]) {
+    for (const p of chunks(html, size, { closePre: true })) {
+      ok(p.length <= size, `size ${size}: emitted a ${p.length}-char chunk`);
+    }
+  }
+});
+
+t('closePre is off by default — raw-markdown callers are untouched', () => {
+  const html = `<pre>${'x'.repeat(200)}</pre>`;
+  eq(chunks(html, 100).join('').length, html.length, 'default path adds nothing');
+});
+
+// ---------- copy button (Bot API 8.0 copy_text, 1-256 chars) ----------
+t('one short fence gets a copy button carrying the exact code', () => {
+  const got = copyButtonFor('Run this:\n\n```bash\nnpm ci && npm test\n```\n');
+  eq(got.code, 'npm ci && npm test');
+  eq(got.markup, { inline_keyboard: [[{ text: 'Copy', copy_text: { text: 'npm ci && npm test' } }]] });
+});
+
+t('a fence over 256 chars gets no button — never truncated to fit', () => {
+  eq(copyButtonFor('```\n' + 'x'.repeat(COPY_TEXT_LIMIT + 1) + '\n```'), null);
+  ok(copyButtonFor('```\n' + 'x'.repeat(COPY_TEXT_LIMIT) + '\n```') !== null, 'exactly at the limit still qualifies');
+});
+
+t('two fences get no button — one button cannot say which it copies', () => {
+  eq(copyButtonFor('```\na\n```\n\ntext\n\n```\nb\n```'), null);
+});
+
+t('no fence, or an empty one, gets no button', () => {
+  eq(copyButtonFor('just prose'), null);
+  eq(copyButtonFor('```\n\n```'), null);
 });
 
 // ---------- report ----------

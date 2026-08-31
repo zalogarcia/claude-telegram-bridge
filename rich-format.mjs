@@ -140,9 +140,11 @@ export function detailsToHtml(md, toHtml) {
  * @param {string} md
  * @param {(s: string) => string} [inlineHtml]  unused — see toPlain; kept so the
  *        call site does not change if inline formatting becomes available
+ * @param {{nested?: boolean}} [opts]  set by the recursive calls: blocks nested
+ *        inside details/blockquote must use only probed rich types
  * @returns {Array<object>} blocks
  */
-export function mdToRichBlocks(md, inlineHtml) {
+export function mdToRichBlocks(md, inlineHtml, { nested = false } = {}) {
   const lines = String(md).split('\n');
   const blocks = [];
   let para = [];
@@ -166,21 +168,36 @@ export function mdToRichBlocks(md, inlineHtml) {
       const inner = [];
       let j = i + 1;
       while (j < lines.length && !/^:::\s*$/.test(lines[j])) inner.push(lines[j++]);
-      const body = mdToRichBlocks(inner.join('\n'), inlineHtml);
+      const body = mdToRichBlocks(inner.join('\n'), inlineHtml, { nested: true });
       if (body.length) blocks.push({ type: 'details', summary: det[1].trim() || 'Details', blocks: body });
       i = j;
       continue;
     }
 
-    // Fenced code — kept whole, emitted as a paragraph carrying <pre>. There is
-    // no probed code block type, and paragraph+HTML renders identically.
+    // Fenced code — its OWN block type, hoisted out of the rich message.
+    //
+    // This used to claim it emitted "a paragraph carrying <pre>". It did not:
+    // paragraphs are plain text (see toPlain), so the backticks were stripped
+    // and nothing marked the text as code. Since any message with a table takes
+    // this path, the owner had never actually received a code block — which is
+    // also why no copy affordance ever appeared, there being nothing to copy
+    // from. There is still no probed rich code type, and guessing one would get
+    // the WHOLE message rejected, so the sender ships this block on the HTML
+    // rail instead, as <pre><code class="language-x"> — the same tag md-format
+    // has always produced, and what the clients make copyable at ANY length.
     if (/^```/.test(line)) {
       flushPara();
-      const fence = [line];
+      const lang = /^```([\w-]*)/.exec(line)[1] || '';
+      const body = [];
       let j = i + 1;
-      while (j < lines.length && !/^```/.test(lines[j])) fence.push(lines[j++]);
-      if (j < lines.length) fence.push(lines[j]);
-      blocks.push({ type: 'paragraph', text: fence.join('\n').replace(/^```[\w-]*\n?|```$/gm, '').trim() });
+      while (j < lines.length && !/^```/.test(lines[j])) body.push(lines[j++]);
+      const text = body.join('\n').replace(/\n$/, '');
+      // NESTED code (inside ::: details / a blockquote) stays a paragraph. A
+      // nested block is sent INSIDE the rich message, where an unsupported type
+      // rejects the whole thing — and hoisting it out would move the code away
+      // from the section that explains it. Same loss as before, now bounded to
+      // the rare case instead of every message.
+      if (text.trim()) blocks.push(nested ? { type: 'paragraph', text } : { type: 'code', lang, text });
       i = j;
       continue;
     }
@@ -229,7 +246,7 @@ export function mdToRichBlocks(md, inlineHtml) {
         quoted.push(lines[j].replace(/^\s*>\s?/, ''));
         j++;
       }
-      const body = mdToRichBlocks(quoted.join('\n'), inlineHtml);
+      const body = mdToRichBlocks(quoted.join('\n'), inlineHtml, { nested: true });
       if (body.length) blocks.push({ type: 'blockquote', blocks: body });
       i = j - 1;
       continue;
@@ -289,6 +306,32 @@ function toPlain(s) {
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/(^|[\s(])\*(\S(?:[^*\n]*\S)?)\*(?=$|[\s.,;:!?)])/g, '$1$2')
     .trim();
+}
+
+/**
+ * Split a block list into the runs the sender ships on each rail, in order:
+ * `{rich: [...]}` goes to sendRichMessage, `{code: block}` goes out as its own
+ * HTML message so it arrives as a real <pre> block. Order is preserved, so the
+ * code still lands between the sections that explain it.
+ *
+ * Keeping this separate from chunkBlocks is what guarantees a code block never
+ * reaches sendRichMessage as an unprobed type — which would reject the whole
+ * message and latch the rich path off for the run.
+ */
+export function splitCodeRuns(blocks) {
+  const runs = [];
+  let cur = [];
+  for (const b of blocks) {
+    if (b.type === 'code') {
+      if (cur.length) runs.push({ rich: cur });
+      cur = [];
+      runs.push({ code: b });
+    } else {
+      cur.push(b);
+    }
+  }
+  if (cur.length) runs.push({ rich: cur });
+  return runs;
 }
 
 /** Split blocks into message-sized groups without splitting a block. */

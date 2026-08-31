@@ -85,15 +85,60 @@ export function renderMdTables(text) {
   return out.join('\n');
 }
 
+// The ONE definition of "this is a fenced code block", shared with the rich
+// path so both renderers find the same fences. rich-format read fences with its
+// own regex and emitted them as PLAIN PARAGRAPHS — backticks stripped, no <pre>
+// — so every message taking the rich path (i.e. any message with a table) also
+// reached the owner with no code block in it, and therefore nothing for the
+// Telegram clients to offer a copy affordance on.
+const FENCE = /```([\w-]*)\n?([\s\S]*?)```/g;
+
+/** Render one code block as Telegram's <pre>. The ONE escaping of a fence. */
+export function codeHtml(code, lang) {
+  const body = escHtml(String(code).replace(/\n$/, ''));
+  // Keep the fence language — Telegram syntax-highlights <pre><code class="language-x">.
+  return lang ? `<pre><code class="language-${escHtml(lang)}">${body}</code></pre>` : `<pre>${body}</pre>`;
+}
+
+// A fresh clone per call: FENCE is global, and both matchAll and replace read
+// and advance its lastIndex — sharing the instance across two consumers is a
+// stateful coupling that would silently skip the first fence.
+const parseFences = (md) =>
+  [...String(md).matchAll(new RegExp(FENCE.source, 'g'))].map(([, lang, code]) => ({
+    lang: lang || '',
+    code: code.replace(/\n$/, ''),
+  }));
+
+// Bot API 8.0's InlineKeyboardButton.copy_text: "The text to be copied to the
+// clipboard; 1-256 characters". That cap is shorter than most snippets worth
+// pasting, so the button is a bonus for SHORT ones only — the <pre> block is
+// what makes a snippet of ANY length copyable in the clients, and it is never
+// traded away for the button. Two fences get no button either: one button can't
+// say which block it copies, and copying the wrong command beats copying none.
+export const COPY_TEXT_LIMIT = 256;
+
+/**
+ * The copy button for a message, or null when the message doesn't qualify.
+ * @returns {{code: string, markup: object}|null}
+ */
+export function copyButtonFor(md, limit = COPY_TEXT_LIMIT) {
+  const found = parseFences(md);
+  if (found.length !== 1) return null;
+  const { code } = found[0];
+  // Never truncate to fit: a button that copies half a command is worse than no
+  // button. Length in UTF-16 units is >= the codepoint count, so this stays
+  // conservative whichever unit Telegram counts.
+  if (!code.trim() || code.length > limit) return null;
+  return { code, markup: { inline_keyboard: [[{ text: 'Copy', copy_text: { text: code } }]] } };
+}
+
 // Convert Claude's markdown replies to Telegram-HTML (headers→bold, fences→pre,
 // inline code, links, bullets, tables). Code spans are extracted first so no
 // transform touches their contents. Sender falls back to plain on a parse reject.
 export function mdToTelegramHtml(md) {
   const fences = [];
-  // Keep the fence language — Telegram syntax-highlights <pre><code class="language-x">.
-  let t = md.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    const body = escHtml(code.replace(/\n$/, ''));
-    fences.push(lang ? `<pre><code class="language-${escHtml(lang)}">${body}</code></pre>` : `<pre>${body}</pre>`);
+  let t = md.replace(FENCE, (_, lang, code) => {
+    fences.push(codeHtml(code, lang));
     return `\u0000${fences.length - 1}\u0000`;
   });
   const inline = [];
@@ -136,6 +181,18 @@ export function mdToTelegramHtml(md) {
   return t;
 }
 
+// The opening tag of a <pre> still unclosed at the end of `s`, else null. Only
+// the two shapes codeHtml emits are matched, so prose that merely mentions a
+// tag can't trip it.
+function openPre(s) {
+  const o = s.lastIndexOf('<pre>');
+  if (o === -1 || s.lastIndexOf('</pre>') > o) return null;
+  const m = /^<pre>(?:<code[^>]*>)?/.exec(s.slice(o));
+  return m ? m[0] : null;
+}
+const preCloser = (open) => (open.includes('<code') ? '</code></pre>' : '</pre>');
+const PRE_TAIL = '</code></pre>'.length;
+
 // Split rendered HTML into sendable pieces. `size` is the caller's limit —
 // Telegram's own ceiling lives in the daemon, not here.
 //
@@ -144,14 +201,30 @@ export function mdToTelegramHtml(md) {
 // degrades to plain text, silently losing all formatting on long answers.
 // Prefer a newline boundary, fall back to a space, and only hard-cut when a
 // single line genuinely exceeds the limit (e.g. one enormous <pre> block).
-export function chunks(text, size) {
+//
+// `closePre` is for callers passing RENDERED HTML: a code block longer than one
+// message used to be cut in half, leaving one chunk with an unclosed <pre> and
+// the next with a stray closer — both rejected, both degraded to plain text, so
+// the longest snippets (the ones most worth pasting) were exactly the ones that
+// lost their code block. With it on, a split <pre> is closed at the boundary and
+// reopened with the same tag, so each message carries a whole, valid block.
+// Off by default because the daemon also chunks RAW MARKDOWN before rendering
+// it, where an unclosed "<pre" can only be prose about a tag.
+export function chunks(text, size, { closePre = false } = {}) {
   const out = [];
   let rest = text;
-  while (rest.length > size) {
-    const window = rest.slice(0, size);
+  let carry = ''; // reopening tag owed to the next chunk by a split <pre>
+  while (carry.length + rest.length > size) {
+    // Reserve room for the closer, so closing a split block can never push the
+    // chunk past the limit it was cut to respect. If the tags cannot fit the
+    // budget at all (a tiny `size`), keep the block open rather than emit an
+    // oversized message: the size limit is the one Telegram enforces.
+    const canClose = closePre && size - carry.length - PRE_TAIL > 0;
+    const room = Math.max(1, size - carry.length - (canClose ? PRE_TAIL : 0));
+    const window = rest.slice(0, room);
     let cut = window.lastIndexOf('\n');
-    if (cut < size * 0.5) cut = window.lastIndexOf(' '); // don't strand a tiny chunk
-    if (cut < size * 0.5) cut = size; // one unbroken run — hard-cut is the only option
+    if (cut < room * 0.5) cut = window.lastIndexOf(' '); // don't strand a tiny chunk
+    if (cut < room * 0.5) cut = room; // one unbroken run — hard-cut is the only option
     // Never cut inside a tag: if the boundary sits after an unclosed '<', back
     // up to it so the tag moves whole into the next chunk.
     const open = window.slice(0, cut).lastIndexOf('<');
@@ -162,10 +235,19 @@ export function chunks(text, size) {
     // while() blocks the event loop. Never accept a non-advancing cut: take the
     // hard cut instead. A tag split this way just makes Telegram reject that
     // chunk, and the caller already falls back to plain text for it.
-    if (cut <= 0) cut = size;
-    out.push(rest.slice(0, cut));
+    if (cut <= 0) cut = room;
+    let chunk = carry + rest.slice(0, cut);
+    carry = '';
+    if (canClose) {
+      const open = openPre(chunk);
+      if (open) {
+        chunk += preCloser(open);
+        carry = open;
+      }
+    }
+    out.push(chunk);
     rest = rest.slice(cut).replace(/^\n/, '');
   }
-  if (rest) out.push(rest);
+  if (rest || carry) out.push(carry + rest);
   return out.length ? out : [''];
 }
