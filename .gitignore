@@ -1,5 +1,6 @@
 # secrets + local state — never commit these
 config.json
+accounts.backup.json
 state.json
 schedules.json
 bg-queue.json

@@ -122,6 +122,26 @@ export function tailLines(logPath, onLine, { intervalMs = 300 } = {}) {
   };
 }
 
+// Fatal harness errors that Claude Code delivers AS the result text of the
+// final result event, so "there is result text" is not proof of success.
+// Phrase-anchored in the same spirit as the limit detection in the private
+// repo's accounts.mjs: specific multi-word phrases, each with a reason, never a
+// bare /error/i — a worker's ANSWER legitimately contains the word "error"
+// all the time (bug reports, audits, test output).
+//   Measured 2026-08-31: a worker died with "Failed to authenticate: OAuth
+//   session expired and could not be refreshed" as its result text, and the
+//   text-wins rule below stamped it `✅ … · 7m 1s`. Nobody looked for hours.
+const FATAL_RESULT_PHRASES = [
+  /failed to authenticate/i, // the CLI's auth-death preamble (the 2026-08-31 green tick)
+  /oauth session expired/i, // the token-death middle of that same message
+  /could not be refreshed/i, // its tail — any fragment of it alone still means the run died
+  /invalid api key/i, // the CLI's other credential death, emitted the same way
+];
+export function isFatalResultText(text) {
+  const s = String(text || '');
+  return FATAL_RESULT_PHRASES.some((re) => re.test(s));
+}
+
 // The single place that turns (answers, result event, exit code, stderr) into
 // what the chat lane is told. The close handler calls it while the daemon is
 // alive; the re-attach path calls it for a worker that outlived the daemon.
@@ -132,6 +152,16 @@ export function tailLines(logPath, onLine, { intervalMs = 300 } = {}) {
 export function bgOutcome(resultTexts, resultEvent, code, stderrTail) {
   if (resultTexts.length) {
     const answer = resultTexts.join('\n\n');
+    // Text is not proof of success. The result EVENT's own error flags win
+    // (is_error, or a subtype that is present and not "success" — an absent
+    // subtype is an older event shape, not an error), and the known fatal
+    // harness phrases above catch the case where the event LOOKS clean but the
+    // text is the CLI reporting its own death.
+    const eventErrored =
+      !!resultEvent && (resultEvent.is_error === true || (resultEvent.subtype != null && resultEvent.subtype !== 'success'));
+    if (eventErrored || isFatalResultText(answer)) {
+      return { status: 'failed', answer: `The worker FAILED: ${answer}`, record: `FAILED: ${answer}` };
+    }
     return { status: 'finished', answer, record: answer };
   }
   if (resultEvent?.is_error || code !== 0) {
@@ -238,7 +268,7 @@ export function createInflightRegistry({ file }) {
 // bridge repos legitimately differ:
 //   onDeadWorkers(dead, reason)  dead = [{ id, rec, ageMs }] — the host writes
 //                               the alert; wording is not this module's business
-//   onOutcome(task, outcome)     deliver a re-attached worker's result the same
+//   onOutcome(task, outcome, id) deliver a re-attached worker's result the same
 //                               way the close handler would have
 //   log(msg)                     informational line, defaults to console.log
 export function createWorkerWatchdog({
@@ -312,6 +342,7 @@ export function createWorkerWatchdog({
       onOutcome?.(
         rec.task || '(unknown task — worker re-attached after a daemon restart)',
         bgOutcomeFromLines(kept),
+        id, // the registry key, so a re-attached worker's report files under its own run id
       );
     }, reattachPollMs);
     poll.unref?.(); // a re-attach poll must not hold the process open by itself

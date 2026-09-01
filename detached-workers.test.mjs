@@ -276,6 +276,44 @@ console.log('\n5. outcome derivation edge cases');
   ok('silent clean exit writes NO bg-results row (unchanged behaviour)', silent.record === null);
   ok('two turns are joined, both preserved', bgOutcome(['a', 'b'], null, 0, '').answer === 'a\n\nb');
 
+  // The green-tick bug (2026-08-31): Claude Code delivers fatal harness errors
+  // AS the result text, and "any text → finished" stamped a dead worker with
+  // ✅ · 7m 1s. A result is failed when the EVENT says error — even with text
+  // present — or when the text itself is a known fatal shape.
+  const authDeath = 'Failed to authenticate: OAuth session expired and could not be refreshed';
+  ok(
+    '★ fatal harness text → failed even when the event looks clean',
+    bgOutcome([authDeath], { type: 'result', subtype: 'success', is_error: false }, 0, '').status === 'failed',
+  );
+  ok(
+    'an errored result EVENT with text present → failed (text is not proof of success)',
+    bgOutcome(['partial answer'], { type: 'result', is_error: true, subtype: 'error_during_execution' }, 0, '').status ===
+      'failed',
+  );
+  ok(
+    'a non-success subtype with text → failed',
+    bgOutcome(['partial answer'], { type: 'result', is_error: false, subtype: 'error_max_turns' }, 0, '').status === 'failed',
+  );
+  ok(
+    'an event with NO subtype field and clean text stays finished (older event shapes)',
+    bgOutcome(['hi'], { type: 'result', is_error: false }, 0, '').status === 'finished',
+  );
+  ok(
+    'an answer that merely talks about errors is NOT failed',
+    bgOutcome(['Fixed the error handling; the API now retries.'], { type: 'result', subtype: 'success', is_error: false }, 0, '')
+      .status === 'finished',
+  );
+  {
+    const dead = bgOutcome([authDeath], { type: 'result', subtype: 'success', is_error: false }, 0, '');
+    ok('failed-with-text keeps the full text in the answer', dead.answer.includes(authDeath));
+    ok('failed-with-text records a FAILED row, not a clean one', dead.record.startsWith('FAILED:'));
+  }
+  ok(
+    'the re-attach path classifies the same auth death as failed',
+    bgOutcomeFromLines([JSON.stringify({ type: 'result', is_error: true, subtype: 'error_during_execution', result: authDeath })])
+      .status === 'failed',
+  );
+
   // Re-attach has no exit code and must infer one.
   ok(
     'inferred: stderr with no result → failed',
