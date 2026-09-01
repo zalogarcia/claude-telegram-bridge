@@ -49,6 +49,14 @@ SHARED_MODULES=(
   progress-render.test.mjs
   usage-limits.mjs
   usage-limits.test.mjs
+  accounts.mjs
+  accounts.test.mjs
+  account-usage.mjs
+  account-usage.test.mjs
+  account-buttons.mjs
+  account-buttons.test.mjs
+  credential-store.mjs
+  credential-store.test.mjs
 )
 
 if [ ! -d "$SIBLING" ]; then

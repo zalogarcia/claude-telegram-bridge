@@ -50,6 +50,7 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 | 🎙️ **Voice notes** | Talk instead of typing. Transcribed with Whisper, run as a prompt. |
 | 📎 **Files & photos** | Send a screenshot with "why does this look broken?" — images, PDFs, code, anything ≤20MB. |
 | ⏰ **Reminders & cron** | "Remind me at 8" or "every morning summarize yesterday's commits" — the second one actually runs. |
+| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap — and when the active account is rate limited, the bridge rotates background work to one that isn't. [Details.](docs/multi-account.md) |
 | 🩺 **Self-healing** | KeepAlive restarts crashes; a two-strike watchdog catches wedges and tells you it did. |
 | 🎛️ **Full CLI access** | Your custom slash commands work. Switch models mid-conversation. Check usage. |
 
@@ -154,6 +155,8 @@ does the message queue instead.
 | `/cd <path>` | Switch working directory (must be under `$HOME`) |
 | `/model [name]` | Show or set the model for future runs |
 | `/context` | Session context size, your 5h and weekly plan limits (% used + time left), and token/cost totals ([ccusage](https://github.com/ryoppippi/ccusage)). The limits need [one line in your statusline](docs/statusline.md); everything else works out of the box |
+| `/account` | Which Claude account is live + each enrolled account's headroom, with one-tap swap buttons. `/account <name>` swaps; `/account capture <name>` enrolls the current login ([multi-account setup](docs/multi-account.md)) |
+| `/usage` | Live 5h-block and weekly plan usage for **every** enrolled account — which one still has headroom |
 | `/status` | Directory, session, model, and a live block per lane: elapsed, steps, current task, latest action |
 | `/stop [bg\|all]` | Kill the running task and clear that lane's queue |
 | `/restart` | Restart the daemon remotely |
@@ -170,8 +173,57 @@ runs in order.
 
 `/compact` is the bridge's own implementation, not the interactive built-in: it
 asks the current session for a handoff summary, archives that session, and opens
-a fresh one primed with the summary. The interactive `/usage` screen has no
-headless equivalent — `/context` covers it.
+a fresh one primed with the summary. The bridge's `/usage` goes further than the
+interactive screen: it reads live plan usage for every enrolled account, not just
+the one currently logged in.
+
+## Multiple Claude accounts
+
+If you legitimately hold more than one Claude subscription — a personal plan and
+a work plan, say — the bridge can hold credentials for each and switch which one
+Claude Code runs as. This is a **multi-account switcher**, not a way around
+anyone's plan limits: each account keeps exactly the limits you pay for, and
+when one is rate limited the bridge simply lets background work continue on
+another subscription you own until the first one's window resets.
+
+One-time setup, once per account:
+
+1. Log into an account normally (claude.ai + `claude /login`).
+2. Send `/account capture <name>` (the account's email is the natural name).
+3. Repeat for the next account.
+
+After that: `/account` shows every enrolled account with its live headroom and
+one-tap swap buttons; `/account <name>` swaps by text; `/usage` is the full
+per-account usage view; and when a background worker dies on a session limit,
+the bridge marks that account limited and rotates new work to the
+least-recently-used account that still has headroom. Workers already running are
+never killed by a swap — only new ones pick up the new account.
+
+**Credentials never leave your machine.** Enrolled accounts live in
+`accounts.json` next to the bridge (chmod 600, gitignored — see
+[accounts.example.json](accounts.example.json) for the shape); the live login
+lives where Claude Code itself keeps it — the **macOS Keychain** on a Mac,
+`~/.claude/.credentials.json` (0600) elsewhere. The only network calls are to
+Anthropic's own OAuth endpoints, for usage numbers and account identity. The
+non-macOS file path is **less battle-tested** than the Keychain path — it is
+covered by the test suite but has had less real-world mileage; treat it
+accordingly.
+
+**The sharpest edge — refresh-token rotation.** When a Claude Code session
+refreshes an account's access token, the *refresh token rotates too*: the old
+one dies the moment the new one is issued. A rotated token that is not saved
+means that account cannot log in again without a manual `claude /login`. The
+bridge is built around never letting that happen — every swap re-banks the
+outgoing account's live tokens *before* installing the incoming ones, refreshed
+tokens are persisted before first use, the live account is never refreshed
+behind the running session's back, and before the bridge's first-ever credential
+write it saves a one-time backup (`accounts.backup.json`) of your pre-existing
+login. If an account does end up locked out (say its slot went stale while the
+bridge was off for weeks), the fix is always the same and always works: log into
+that account by hand, then `/account capture <name>` it again.
+
+Full detail — what a swap actually writes, the MCP-token guarantee, the drift
+guard, and every failure mode: [docs/multi-account.md](docs/multi-account.md).
 
 ## Security
 

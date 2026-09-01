@@ -9,6 +9,7 @@
   "effort": "",
   "yolo": "true",
   "ownerName": "the owner",
+  "ownerTz": "",
 
   "timeoutMs": 1800000,
   "bgTimeoutMs": 28800000,
@@ -26,6 +27,7 @@
     "effort": "Empty = CLI default. Or 'low' | 'medium' | 'high' | 'xhigh'.",
     "yolo": "'true' passes --dangerously-skip-permissions (headless runs can't answer prompts). 'false' uses acceptEdits.",
     "ownerName": "What the assistant calls you when reporting on background work.",
+    "ownerTz": "IANA timezone for /account, /usage and /status reset clocks (e.g. 'America/New_York'). Empty = this machine's local zone.",
     "timeoutMs": "Kill a CHAT-lane task after this long. Default 30 minutes — you're waiting on the reply.",
     "bgTimeoutMs": "Kill a BACKGROUND worker after this long. Default 8 hours — that lane is for hour-scale jobs.",
     "staleSec": "Ignore messages older than this (e.g. queued while the machine slept). Default 1 hour.",

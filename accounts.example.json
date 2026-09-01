@@ -1,0 +1,26 @@
+[
+  {
+    "name": "personal@example.com",
+    "email": "personal@example.com",
+    "claudeAiOauth": {
+      "accessToken": "sk-ant-oat01-FAKE-EXAMPLE-NOT-A-REAL-TOKEN",
+      "refreshToken": "sk-ant-ort01-FAKE-EXAMPLE-NOT-A-REAL-TOKEN",
+      "expiresAt": 1790000000000,
+      "refreshTokenExpiresAt": 1792000000000,
+      "scopes": ["user:inference", "user:profile"],
+      "subscriptionType": "max",
+      "rateLimitTier": "default_claude_max_20x"
+    },
+    "limitedUntil": null,
+    "lastActiveAt": "2026-08-31T20:00:00.000Z",
+    "capturedAt": "2026-08-31T19:00:00.000Z"
+  },
+  {
+    "name": "work@example.com",
+    "email": "work@example.com",
+    "claudeAiOauth": null,
+    "limitedUntil": null,
+    "lastActiveAt": null,
+    "capturedAt": null
+  }
+]

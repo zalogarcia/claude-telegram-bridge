@@ -31,6 +31,21 @@ import {
   fmtAge,
 } from './progress-render.mjs';
 import { execJson, fmtTokens, readRateLimits, fmtLeft, fmtLimit, modelWindow } from './usage-limits.mjs';
+import { createAccountStore, fingerprint, isLimitSignal, parseResetTime } from './accounts.mjs';
+import {
+  createAccountUsage,
+  invalidateUsageCache,
+  usageLine,
+  renderAccountList,
+  renderUsageReport,
+  unclaimedLine,
+  swapConfirmation,
+  swapFailure,
+  captureConfirmation,
+  captureFailure,
+  fetchProfile,
+} from './account-usage.mjs';
+import { buildAccountKeyboard, createAccountCallbacks } from './account-buttons.mjs';
 import {
   spawnWorker,
   tailLines,
@@ -126,6 +141,10 @@ const DEFAULT_EFFORT = conf('effort', '');
 const DEFAULT_YOLO = String(conf('yolo', 'true')) !== 'false';
 // What the assistant calls you in background-worker reports.
 const OWNER_NAME = conf('ownerName', 'the owner');
+// The IANA timezone /account, /usage and /status render reset clocks in
+// (e.g. "America/New_York"). Empty = this machine's local zone. Set it when
+// you read the bridge from a different timezone than the machine runs in.
+const OWNER_TZ = conf('ownerTz', '') || undefined;
 const OPENAI_KEY_CONF = conf('openaiApiKey', '');
 const SELFTEST = process.argv.includes('--selftest');
 
@@ -863,6 +882,8 @@ const RESERVED_COMMANDS = new Set([
   '/yolo',
   '/model',
   '/context',
+  '/account',
+  '/usage',
   '/restart',
   '/logs',
   '/remind',
@@ -961,12 +982,142 @@ function recordBgResult(prompt, result) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// MULTIPLE CLAUDE ACCOUNTS. For owners who hold more than one Claude
+// subscription (a personal plan and a work plan, say), the bridge can bank
+// each account's credentials in a named slot (/account capture <name>) and
+// swap which one is live (/account <name>, or a button tap). A usage limit
+// does not invalidate credentials — the limited account's tokens stay valid
+// until its reset — so when a background worker dies on a session limit the
+// bridge can also rotate to the next enrolled account that has headroom,
+// instead of stalling every job until you notice. accounts.mjs owns the how;
+// this owns the when. Credentials never leave this machine.
+//
+// Two guards keep a limit wall from eating the whole rotation:
+//   - COOLDOWN: N workers die within seconds of each other on the SAME wall.
+//     The first one rotates; the rest are told about it. Without this, several
+//     simultaneous deaths would burn every enrolled account on one wall.
+//   - PAUSE: when every account is limited, rotating harder does nothing. You
+//     get ONE message with the earliest reset and rotation stands down until
+//     then, rather than re-checking on every worker death.
+// ---------------------------------------------------------------------------
+const ACCOUNTS_FILE = path.join(SCRIPT_DIR, 'accounts.json');
+// `identify` is the banking ladder's second rung (see accounts.mjs): when a
+// live blob fingerprint-matches no slot, the profile endpoint says whose
+// account it is, and the blob is banked into THAT slot or parked — never into
+// whatever slot the guard happened to believe was active. fetchProfile never
+// throws and returns null on any failure, which the ladder reads as "cannot
+// verify".
+const accounts = createAccountStore({
+  file: ACCOUNTS_FILE,
+  identify: async (accessToken) => (await fetchProfile(accessToken))?.email || null,
+});
+// LIVE plan usage per account (5h block + weekly window), straight from
+// Anthropic's OAuth usage endpoint — what /usage renders and what /status's
+// one-line summary reads. 60s TTL inside the module, so /status asking on
+// every call costs nothing.
+const accountUsage = createAccountUsage({ store: accounts });
+
+// Any await that decorates a reply gets a deadline shorter than the reply is
+// allowed to take. The underlying fetch aborts itself at 5s; this makes sure a
+// slow API delays a status line rather than the status.
+const withDeadline = (p, ms, fallback = null) =>
+  Promise.race([p.catch(() => fallback), new Promise((r) => setTimeout(() => r(fallback), ms).unref?.())]);
+const ROTATION_COOLDOWN_MS = 90_000; // one wall kills several workers at once
+const DRIFT_CHECK_MS = 60_000; // see accounts.mjs, the residual-race guard
+let rotationCooldownUntil = 0;
+let rotationPausedUntil = 0; // set when every account is limited
+let lastDriftCheck = 0;
+
+// A worker died on a session limit. Mark the account, swap to the next one,
+// and hand the chat lane ONE note containing all of it — not two messages,
+// because the first would have the assistant re-firing the job before the
+// swap had landed.
+async function handleLimitDeath(task, outcome) {
+  const detail = String(outcome.answer || '');
+  const now = Date.now();
+  const lines = [];
+  const reset = parseResetTime(detail);
+
+  if (now < rotationPausedUntil) {
+    lines.push(
+      `ACCOUNT ROTATION: standing down. Every enrolled Claude account is rate limited until ${new Date(rotationPausedUntil).toLocaleString()}. Do NOT re-fire this job yet.`,
+    );
+  } else if (now < rotationCooldownUntil) {
+    lines.push(
+      `ACCOUNT ROTATION: already rotated moments ago for this same limit wall (cooldown). The account is live; this worker just died on the old one.`,
+    );
+  } else {
+    const active = await accounts.activeAccount();
+    const activeName = active?.account?.name || null;
+    if (activeName) {
+      accounts.markLimited(activeName, reset.resetsAt);
+      lines.push(
+        `ACCOUNT ROTATION: "${activeName}" hit its limit, reset ${fmtLeft(reset.resetsAt)} out${reset.guessed ? ' (GUESSED: the message did not carry a parseable reset time)' : ''}.`,
+      );
+    } else {
+      lines.push(
+        `ACCOUNT ROTATION: a session limit was hit but the live credentials match no captured slot, so nothing could be marked limited. Run /account capture <name> to bank the current login.`,
+      );
+    }
+    const next = accounts.nextAvailable({ activeName });
+    if (next) {
+      const res = await accounts.swapTo(next.name);
+      if (res.ok) {
+        rotationCooldownUntil = Date.now() + ROTATION_COOLDOWN_MS;
+        // An automatic rotation changes which account is live just as much as
+        // a manual /account <name> does, so the cached usage rows and the
+        // cached "which account is active" answer are stale the moment it
+        // lands. Without this, /status would keep naming the limited account
+        // for up to 60s after the swap — exactly when the numbers matter most.
+        invalidateUsageCache();
+        lines.push(`Swapped to account "${next.name}". New workers will use it; workers already running are untouched.`);
+        send(`🔄 Session limit on "${activeName || 'the active account'}", swapped to "${next.name}".`, {
+          markdown: false,
+        }).catch(() => {});
+      } else {
+        lines.push(`Swap to "${next.name}" FAILED: ${res.error}. The account is unchanged.`);
+        send(`⚠️ Session limit hit and the account swap failed: ${res.error}`, { markdown: false }).catch(() => {});
+      }
+    } else {
+      const earliest = accounts.earliestReset();
+      rotationPausedUntil = earliest ? earliest * 1000 : Date.now() + 3600_000;
+      lines.push(`No account is available, all of them are limited. Rotation is paused until the earliest reset.`);
+      send(
+        earliest
+          ? `⛔ Every enrolled Claude account is rate limited. Earliest reset: ${fmtLeft(earliest)} from now. Background work is paused until then.`
+          : `⛔ Every enrolled Claude account is rate limited and no reset time is known. Background work is paused for an hour.`,
+        { markdown: false },
+      ).catch(() => {});
+    }
+  }
+
+  handBackToChat(
+    task,
+    [detail, '', `--- BRIDGE ACCOUNT ROTATION ---`, ...lines].join('\n'),
+    'died on a session limit; the bridge handled the account rotation',
+  );
+}
+
 // Deliver a background worker's outcome: the durable row first, then the note to
 // the chat lane. The close handler and the re-attach path both come through here,
 // so there is exactly one definition of "what happens when a worker finishes" —
 // including for a worker whose daemon is already gone.
 function reportBgOutcome(task, outcome) {
   if (outcome.record != null) recordBgResult(task, outcome.record);
+  // Limit detection reads the FAILURE channel only. A worker's ANSWER routinely
+  // quotes these phrases verbatim (a usage-audit report can be wall to wall
+  // "You've hit your session limit"), and rotating on a quotation would burn
+  // accounts for nothing.
+  if (outcome.status === 'failed' && isLimitSignal(outcome.answer)) {
+    const op = handleLimitDeath(task, outcome).catch((e) => {
+      console.error('[bridge] account rotation failed:', e.message);
+      handBackToChat(task, outcome.answer, outcome.status); // the report must never be lost to a rotation bug
+    });
+    pendingOps.add(op);
+    op.finally(() => pendingOps.delete(op));
+    return;
+  }
   handBackToChat(task, outcome.answer, outcome.status);
 }
 
@@ -1004,6 +1155,178 @@ function handBackToChat(task, output, status) {
     '<<<WORKER_OUTPUT_END>>>',
   ].join('\n');
   dispatchPrompt(note, LANES.main, { priority: true });
+}
+
+// ---------------------------------------------------------------------------
+// THE /account VIEW, AND THE BUTTONS UNDER IT
+//
+// Rendering lives in ONE function because there are two callers — the typed
+// command and a button tap — and two copies of a view drift. Everything that
+// decides what a tap MEANS lives in account-buttons.mjs (pure, unit tested);
+// this half is only the wiring: Telegram calls in, side effects out.
+//
+// NOTHING here may print a token. Every rendering of credentials goes through
+// accounts.mjs's fingerprint().
+// ---------------------------------------------------------------------------
+
+const NO_ACCOUNTS_VIEW = [
+  '👤 No accounts captured yet.',
+  '',
+  'Setup, once per account: log into it normally (claude.ai + /login), then run',
+  '/account capture <name>',
+  '',
+  'Repeat for each Claude subscription you hold, and the bridge can swap between them (and rotate automatically when one hits its session limit).',
+].join('\n');
+
+async function renderAccountView(status = null) {
+  const rows = accounts.describe();
+  // The parked-blob warning must be impossible to miss even with zero slots
+  // enrolled: a parked blob is a real credential waiting to be claimed.
+  const unclaimed = accounts.describeUnclaimed();
+  if (!rows.length) {
+    const text = unclaimed ? `${NO_ACCOUNTS_VIEW}\n\n${unclaimedLine(unclaimed)}` : NO_ACCOUNTS_VIEW;
+    return { text, markup: null, markdown: !!unclaimed };
+  }
+  // Identity AND usage in one shot. resolveActive() keeps the cheap
+  // fingerprint match as its fast path and falls back to the profile
+  // endpoint's email, which survives every token rotation.
+  //
+  // The accounts are read CONCURRENTLY inside all(); deadlined here so an
+  // unreachable API costs the usage lines, not the /account reply.
+  const snapshot = await withDeadline(accountUsage.all(), 6_000, null);
+  const live =
+    snapshot?.active || (await withDeadline(accountUsage.resolveActive(), 2_000)) || { liveFingerprint: 'none' };
+  // The body is rendered by account-usage.mjs so the exact strings you read
+  // have a unit test; this half stays what it always was — fetch, render,
+  // attach the keyboard. The keyboard is built from the UNORDERED describe()
+  // list, because the callback payload encodes an index into exactly that list
+  // and reordering it for display must never reorder what a tap resolves
+  // against.
+  const body = renderAccountList({ rows, live, usageRows: snapshot?.rows || [], unclaimed }, { timeZone: OWNER_TZ });
+  return {
+    text: status ? `${status}\n\n${body}` : body,
+    markup: buildAccountKeyboard(rows, { activeName: live.name || null }),
+    markdown: true,
+  };
+}
+
+// send(), plus an inline keyboard on the LAST chunk. Degrades the same way
+// send() does — buttons first, then formatting, and only a double failure
+// loses the text.
+async function sendAccountView({ text, markup, markdown = true }) {
+  if (!markup) return send(text, { markdown });
+  const parts = chunks(text, TG_MSG_LIMIT);
+  let last = null;
+  for (let i = 0; i < parts.length; i++) {
+    const withButtons = i === parts.length - 1 ? { reply_markup: markup } : null;
+    try {
+      last = await tg('sendMessage', {
+        chat_id: CHAT_ID,
+        text: markdown ? mdToTelegramHtml(parts[i]) : parts[i],
+        ...(markdown ? { parse_mode: 'HTML' } : {}),
+        ...(withButtons || {}),
+      });
+      continue;
+    } catch (e) {
+      console.error(`[bridge] /account view send failed (${e.message}) — retrying that chunk as plain text`);
+    }
+    last = await tg('sendMessage', { chat_id: CHAT_ID, text: parts[i] }).catch((e) => {
+      console.error(`[bridge] /account view NOT DELIVERED: ${e.message}`);
+      return null;
+    });
+  }
+  return last;
+}
+
+// After a tap, refresh the message that was tapped rather than pushing a new
+// one: the buttons update in place (the account just swapped to drops out of
+// the list) and there is no second copy of the view to tap stale buttons on.
+// Falls back to a new message if the edit is refused — an edit can fail for
+// reasons that have nothing to do with us (message too old, deleted), and the
+// result of a swap has to arrive either way.
+async function refreshAccountView({ messageId, status }) {
+  const view = await renderAccountView(status);
+  if (messageId) {
+    try {
+      await tg('editMessageText', {
+        chat_id: CHAT_ID,
+        message_id: messageId,
+        text: view.markdown ? mdToTelegramHtml(view.text) : view.text,
+        ...(view.markdown ? { parse_mode: 'HTML' } : {}),
+        ...(view.markup ? { reply_markup: view.markup } : {}),
+      });
+      return;
+    } catch (e) {
+      console.error(`[bridge] /account edit failed (${e.message}) — sending a fresh view instead`);
+    }
+  }
+  await sendAccountView(view);
+}
+
+// answerCallbackQuery: the ONLY thing that clears the spinner Telegram puts on
+// a tapped button. `text` is capped at 200 characters by the API, so it is
+// clipped here rather than rejected there. show_alert for anything that must
+// actually be read — a toast is gone in five seconds.
+async function answerCallback(callbackId, text, { alert = false } = {}) {
+  if (!callbackId) return;
+  await tg('answerCallbackQuery', {
+    callback_query_id: callbackId,
+    text: clip(oneLine(String(text || '')), 190),
+    show_alert: !!alert,
+  }).catch((e) => console.error(`[bridge] answerCallbackQuery failed: ${e.message}`));
+}
+
+const handleAccountCallback = createAccountCallbacks({
+  chatId: CHAT_ID,
+  store: accounts,
+  usage: accountUsage,
+  answer: answerCallback,
+  // Fire-and-forget: re-rendering the view costs a deadlined 6s of network,
+  // and the poll loop awaits update handling — blocking it that long would
+  // stall /stop. The tap has already been answered by the time this runs.
+  refreshView: (args) => {
+    const op = refreshAccountView(args).catch((e) =>
+      console.error(`[bridge] /account view refresh failed: ${e.message}`),
+    );
+    pendingOps.add(op);
+    op.finally(() => pendingOps.delete(op));
+  },
+  // The standalone confirmation. AWAITED rather than fire-and-forget, unlike
+  // the refresh above: it is one short sendMessage with no network read behind
+  // it, and it is the only surface that survives the /account message having
+  // scrolled — so it must land before the handler returns, not eventually.
+  notify: (text) => send(text, { markdown: true }),
+  // A tap is the same act as a typed /account <name>, so it takes the same
+  // side effects: choosing an account by hand overrides the
+  // everything-is-limited stand-down, and the cached usage rows are stale.
+  onSwapped: () => {
+    rotationPausedUntil = 0;
+    rotationCooldownUntil = 0;
+    invalidateUsageCache();
+  },
+  // A fresh capture can end a rotation pause (the newly banked account may be
+  // the one with headroom), and the cached row for that slot is now about
+  // different credentials.
+  onCaptured: () => {
+    rotationPausedUntil = 0;
+    invalidateUsageCache();
+  },
+  log: (msg) => console.log(`[bridge] ${msg}`),
+});
+
+// /usage — the full per-account view: 5h block and weekly window for EVERY
+// enrolled account, so "which account should the next job run on?" is visible
+// before something dies to find out. Fire-and-forget like /context (see its
+// call site): concurrent 5s-capped requests must not block the poll loop from
+// serving /stop.
+async function gatherUsage() {
+  try {
+    const snapshot = await accountUsage.all();
+    await send(renderUsageReport(snapshot, { now: Date.now(), timeZone: OWNER_TZ }));
+  } catch (e) {
+    // Nothing here may print a token, error paths included.
+    await send(`❌ Could not read plan usage: ${e.message}`, { markdown: false });
+  }
 }
 
 // A running session hands a long job to the background lane by appending here
@@ -1239,6 +1562,8 @@ const BOT_COMMANDS = [
   { command: 'compact', description: 'Summarize -> fresh chat with summary' },
   { command: 'status', description: 'Live status: chat + every worker, right now' },
   { command: 'context', description: 'Context size + 5h/weekly limits left' },
+  { command: 'account', description: 'Claude accounts: show, swap, capture' },
+  { command: 'usage', description: '5h + weekly limits for every account' },
   { command: 'model', description: 'Show or set the model' },
   { command: 'cd', description: 'Set working directory (resets session)' },
   { command: 'stop', description: 'Kill current task + discard queue' },
@@ -1270,6 +1595,8 @@ Bridge commands:
 /cd <path> — set working directory (see /status for current)
 /model — show model · /model <name> — set it (fable, opus, sonnet, haiku, or full id; "default" resets)
 /context — session context size + 5h-block and weekly usage
+/account — which Claude account is live, plus each one's limit state · /account <name> swaps · /account capture <name> banks the current login into a slot (one-time setup, once per account — for people with more than one Claude subscription)
+/usage — live 5h-block and weekly plan usage for EVERY captured Claude account (which one still has headroom)
 /status — live status: cwd, session, model + what every lane is doing right now
 /stop [bg|all] — kill the running task (chat lane by default)
 /restart — restart the bridge daemon itself (if something feels stuck)
@@ -1489,12 +1816,20 @@ async function handleCommand(text) {
       const pct = st.lastContextTokens
         ? ` · ctx ${Math.min(100, Math.round((st.lastContextTokens / win) * 100))}%`
         : '';
+      // ONE line, for the live account only. /status is a liveness view, not a
+      // usage dump — /usage is the dump. Cached for 60s inside the module, and
+      // deadlined here, so a slow or unreachable API costs the line, not the
+      // reply: usageLine() returns null and the line is omitted entirely
+      // rather than printing an error into a "what is running right now" view.
+      const liveUsage = await withDeadline(accountUsage.activeOnly(), 2_500);
+      const usageStatus = liveUsage ? usageLine(liveUsage.row, { timeZone: OWNER_TZ }) : null;
       await send(
         [
           `**📍 Bridge on ${hostname().replace(/\.local$/, '')}**`,
           `📁 ${st.cwd.replace(HOME, '~')}`,
           `🧠 ${st.model || DEFAULT_MODEL || 'CLI default'} · ${st.yolo ? 'YOLO' : 'acceptEdits'}`,
           `💬 chat ${st.sessionId ? st.sessionId.slice(0, 8) : 'fresh'}${pct}${st.bgSessionId ? ` · bg ${st.bgSessionId.slice(0, 8)}` : ''}`,
+          ...(usageStatus ? [usageStatus] : []),
           '',
           laneBlock(LANES.main),
           ...(activeBg.length
@@ -1527,6 +1862,79 @@ async function handleCommand(text) {
         saveState();
         await send(`✅ Model set to ${m} for future runs (session continues).`, { markdown: false });
       }
+      return;
+    }
+    case '/account': {
+      // Three shapes: no arg = show (read-only, always), "capture <name>" =
+      // bank the CURRENT login into a slot, "<name>" = swap to that slot.
+      // Awaited inline rather than fire-and-forget like /context: the
+      // credential store answers in milliseconds, and a swap's reply has to
+      // reflect what actually landed.
+      //
+      // NOTHING in this arm may print a token. Every rendering of credentials
+      // goes through accounts.mjs's fingerprint(): six trailing characters,
+      // enough to tell accounts apart and useless to anyone reading over your
+      // shoulder or scrolling the daemon log.
+      const parts = arg.trim().split(/\s+/).filter(Boolean);
+      if (parts[0] === 'capture') {
+        const name = parts[1];
+        if (!name) {
+          await send('Usage: /account capture <name> banks the CURRENT login into that slot.', { markdown: false });
+          return;
+        }
+        const r = await accounts.captureCurrent(name);
+        // A fresh capture can end a rotation pause: the newly banked account
+        // may be the one with headroom. And the cached usage is keyed by slot
+        // name — this slot now holds different credentials, so the cached row
+        // is about the wrong account.
+        if (r.ok) rotationPausedUntil = 0;
+        if (r.ok) invalidateUsageCache();
+        // Same builders as the button path, so the typed rail and the tapped
+        // rail cannot say the same thing two different ways — and so the email
+        // is code-wrapped here too, which is what stops Telegram turning it
+        // into a blue mailto link.
+        await send(
+          r.ok
+            ? `${captureConfirmation({ slot: name, fingerprint: fingerprint(r.account.claudeAiOauth), replaced: !!r.replaced })}\n\nRepeat once per account: log into the next one normally, then run this again with a different name.`
+            : captureFailure(r.error),
+          { markdown: true },
+        );
+        return;
+      }
+      if (parts.length) {
+        // Read the cached headroom for the target BEFORE invalidating, exactly
+        // as the button path does: the percentages belong to the account, not
+        // to which one is live, so a row fetched in the last minute is still
+        // true of it — and a confirmation must never wait on the network.
+        const brief = accountUsage.peek(parts[0]);
+        const r = await accounts.swapTo(parts[0]);
+        // Choosing an account by hand overrides the "everything is limited"
+        // stand-down; you can see something the bridge cannot.
+        if (r.ok) {
+          rotationPausedUntil = 0;
+          rotationCooldownUntil = 0;
+          // A swap changes which account is live, so the cached "active"
+          // answer and every cached row are stale the moment it lands.
+          invalidateUsageCache();
+        }
+        await send(
+          r.ok
+            ? `${swapConfirmation({ to: r.to, from: r.from, usage: brief })}\nWorkers already running keep their old session; only new ones pick this up.`
+            : swapFailure({ to: parts[0], error: r.error, backupPath: accounts.hasBackup() ? accounts.backupFile : null }),
+          { markdown: true },
+        );
+        return;
+      }
+      const view = await renderAccountView();
+      await sendAccountView(view);
+      return;
+    }
+    case '/usage': {
+      // Fire-and-forget, same reason as /context below: several network reads
+      // must not stop the poll loop from serving /stop.
+      const uop = gatherUsage().catch((e) => console.error('[bridge] /usage failed:', e.message));
+      pendingOps.add(uop);
+      uop.finally(() => pendingOps.delete(uop));
       return;
     }
     case '/context': {
@@ -1923,6 +2331,15 @@ async function handleMedia(msg) {
 // ---------- update handling ----------
 
 async function handleUpdate(update) {
+  // A button tap under an /account reply. Authorization, decoding and the
+  // decision of what the tap means all live in account-buttons.mjs; this
+  // routes to it and nothing else. It answers the callback on every path,
+  // including refusals and thrown errors, so a tap can never leave a spinning
+  // button.
+  if (update.callback_query) {
+    await handleAccountCallback(update.callback_query);
+    return;
+  }
   const msg = update.message;
   if (!msg) return;
   if (String(msg.chat?.id) !== CHAT_ID) {
@@ -1976,10 +2393,30 @@ async function pollLoop() {
       writeFileSync(HEARTBEAT_FILE, String(Date.now())); // watchdog liveness signal
       checkSchedules();
       drainBgHandoff();
+      // The account switcher's residual-race guard (see accounts.mjs). A
+      // worker still running on the OUTGOING account can refresh its token and
+      // write its blob back over a swap we just made; this notices and
+      // re-asserts. Free until the first swap of the process: checkDrift()
+      // returns before touching the credential store when nothing has been
+      // asserted yet.
+      if (Date.now() - lastDriftCheck > DRIFT_CHECK_MS) {
+        lastDriftCheck = Date.now();
+        const op = accounts
+          .checkDrift()
+          .catch((e) => console.error('[bridge] account drift check failed:', e.message));
+        pendingOps.add(op);
+        op.finally(() => pendingOps.delete(op));
+      }
       const updates = await tg('getUpdates', {
         offset: state.offset,
         timeout: 50,
-        allowed_updates: ['message'],
+        // callback_query is what makes the /account keyboard's buttons do
+        // anything: without it Telegram RENDERS the buttons and silently drops
+        // every tap, leaving a spinner on the button forever. Both kinds share
+        // one update_id stream, and the offset advance below is driven by
+        // update_id alone — so adding a kind here cannot skip or re-deliver
+        // the other one.
+        allowed_updates: ['message', 'callback_query'],
       });
       for (const u of updates) {
         state.offset = u.update_id + 1;
