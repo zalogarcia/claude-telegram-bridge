@@ -29,7 +29,7 @@ import {
   matchAccount,
   createAccountStore,
 } from './accounts.mjs';
-import { createKeychainStore, createFileStore } from './credential-store.mjs';
+import { createKeychainStore, createFileStore, ARGV_LIMIT } from './credential-store.mjs';
 
 let pass = 0;
 const failures = [];
@@ -285,7 +285,13 @@ await t('matchAccount resolves by refresh token, then access token, then prefix'
 // payload hex encoded behind -X. If the encoding regresses, this fake stops
 // parsing and the tests go red rather than silently accepting anything.
 function fakeKeychain(initialBlob) {
-  const box = { blob: initialBlob ? JSON.parse(JSON.stringify(initialBlob)) : null, writes: 0, argvPayloads: [] };
+  const box = {
+    blob: initialBlob ? JSON.parse(JSON.stringify(initialBlob)) : null,
+    writes: 0,
+    stdinWrites: 0,
+    argvWrites: 0,
+    argvPayloads: [],
+  };
   box.run = async (args, stdin = null) => {
     if (args[0] === 'find-generic-password') {
       return box.blob ? { code: 0, stdout: JSON.stringify(box.blob) } : { code: 44, stdout: '' };
@@ -295,9 +301,22 @@ function fakeKeychain(initialBlob) {
       if (!m) return { code: 1, stdout: '' };
       box.blob = JSON.parse(Buffer.from(m[3], 'hex').toString('utf8'));
       box.writes++;
+      box.stdinWrites++;
       return { code: 0, stdout: '' };
     }
-    // Anything reaching argv with a payload would be a `ps` leak.
+    // The argv fallback the store uses once a blob outgrows the `security -i`
+    // line buffer. Decoded, not merely counted, so a swap through this path is
+    // proved to install the right account. argvPayloads stays the `ps`
+    // exposure ledger: a small blob must never appear in it.
+    if (args[0] === 'add-generic-password') {
+      box.argvPayloads.push(args);
+      const hex = args[args.indexOf('-X') + 1];
+      if (!/^[0-9a-f]+$/.test(hex || '')) return { code: 1, stdout: '' };
+      box.blob = JSON.parse(Buffer.from(hex, 'hex').toString('utf8'));
+      box.writes++;
+      box.argvWrites++;
+      return { code: 0, stdout: '' };
+    }
     box.argvPayloads.push(args);
     return { code: 1, stdout: '' };
   };
@@ -426,26 +445,46 @@ await t('a keychain write that does not read back is reported as a failure', asy
   ok(!/\/login/.test(r.error), 'must not send the owner to re-login when nothing was damaged');
 });
 
-await t('a payload over the security -i line limit is REFUSED before the keychain is touched', async () => {
+await t('a swap whose blob outgrew the security -i line buffer still lands, mcpOAuth intact', async () => {
   const { store, kc } = freshStore(LIVE_BLOB);
   await store.captureCurrent('main');
   await store.captureCurrent('big');
   const seeded = store.listAccounts();
   seeded[1].claudeAiOauth = oauth('second');
   writeFileSync(store.file, JSON.stringify(seeded, null, 2), { mode: 0o600 });
-  // security -i splits any line past ~4096 chars and stores the truncated head,
-  // which is how a swap once left the keychain with no claudeAiOauth at all.
-  // Bulk lives in mcpOAuth, which grows with every MCP server the owner adds.
-  const fat = { ...LIVE_BLOB, mcpOAuth: { pad: 'x'.repeat(4000) } };
+  // THE REGRESSION THIS FILE EXISTS FOR. mcpOAuth grows with every MCP server
+  // the owner adds; one leadconnector entry took the live blob to 5782 bytes,
+  // 11633 encoded, and the switcher refused every swap while the account it was
+  // supposed to leave sat rate-limited. Bigger than the -i line, far under argv.
+  const fatMcp = { ...LIVE_BLOB.mcpOAuth, leadconnector: { accessToken: `x`.repeat(4000) } };
+  kc.blob = { ...LIVE_BLOB, mcpOAuth: fatMcp };
+  const r = await store.swapTo('big');
+  ok(r.ok, `an oversized-but-writable payload must swap, got: ${r.error}`);
+  eq(kc.argvWrites, 1, 'the oversized swap must go through the argv path');
+  eq(fingerprint(kc.blob.claudeAiOauth), fingerprint(oauth('second')), 'the target account is not live');
+  eq(JSON.stringify(kc.blob.mcpOAuth), JSON.stringify(fatMcp), 'mcpOAuth must survive the swap byte for byte');
+});
+
+await t('a payload over BOTH security write limits is REFUSED before the keychain is touched', async () => {
+  const { store, kc } = freshStore(LIVE_BLOB);
+  await store.captureCurrent('main');
+  await store.captureCurrent('big');
+  const seeded = store.listAccounts();
+  seeded[1].claudeAiOauth = oauth('second');
+  writeFileSync(store.file, JSON.stringify(seeded, null, 2), { mode: 0o600 });
+  // Past the argv ceiling too, so neither write path can carry it. A refusal
+  // must still leave the live login exactly where it was: nothing attempted,
+  // nothing to roll back.
+  const fat = { ...LIVE_BLOB, mcpOAuth: { pad: 'x'.repeat(ARGV_LIMIT) } };
   kc.blob = fat;
   let wrote = false;
   const realRun = kc.run;
   kc.run = async (args, stdin) => {
-    if (args[0] === '-i') wrote = true;
+    if (args[0] === '-i' || args[0] === 'add-generic-password') wrote = true;
     return realRun(args, stdin);
   };
   const r = await store.swapTo('big');
-  eq(r.ok, false, 'an oversized payload must not be attempted');
+  eq(r.ok, false, 'an unwritable payload must not be attempted');
   eq(wrote, false, 'the keychain must not be touched at all by a refused write');
   eq(fingerprint(kc.blob.claudeAiOauth), fingerprint(LIVE_BLOB.claudeAiOauth), 'live credentials untouched');
 });

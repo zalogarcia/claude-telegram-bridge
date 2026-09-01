@@ -118,11 +118,15 @@ healthy again.
   (0600, gitignored, never overwritten). If a write corrupts the store AND the
   rollback fails — the worst case — that file's `blob` key is your pre-bridge
   login, and the failure message points at it.
-- **macOS payload-size refusal.** The Keychain write rides one `security -i`
-  line with a measured ~4096-character limit; past it the stored item is
-  silently truncated. The bridge refuses the write *before touching anything*
-  when the encoded blob is too large (the limit shrinks as you add MCP servers,
-  since their tokens share the blob). The file backend has no such cliff: its
+- **macOS payload-size handling.** The preferred Keychain write rides one
+  `security -i` line with a measured ~4096-character limit; past it the stored
+  item is silently truncated. Blobs that fit ride that line, so the token never
+  enters `argv`. Blobs that do not (your MCP server tokens share the blob, and
+  a few servers are enough to outgrow it) go through
+  `security add-generic-password -X`, which has no line limit; the payload is
+  visible in `ps` for the length of that one call, which is why it is the
+  fallback and not the default. Past what even that can carry, the write is
+  refused *before touching anything*. The file backend has no such cliff: its
   writes go to a temp file and land via an atomic rename, so the credentials
   file is never half-written.
 - **Unidentified credentials are parked, never guessed at.** A credential blob
@@ -134,8 +138,9 @@ healthy again.
 - **Tokens are never printed.** Not in replies, logs, or error text. The only
   rendering anywhere is a 6-character fingerprint (`a…AAAAAA/r…BBBBBB`) —
   enough to tell slots apart, useless to a shoulder-surfer or a log reader.
-  On macOS the token payload also never enters `argv` (it rides stdin,
-  hex-encoded), so it can't appear in `ps`.
+  On macOS the token payload rides stdin, hex-encoded, so it does not appear in
+  `ps` at all, except for the oversized-blob fallback described above, where it
+  is in `argv` for the duration of one `security` call.
 
 ## Privacy
 

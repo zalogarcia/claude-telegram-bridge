@@ -2,6 +2,22 @@
 
 All notable changes to the Claude Telegram bridge. Dates are release dates.
 
+## 1.2.1 (2026-09-01)
+
+**Account swaps work again once you have a few MCP servers connected.** The credential blob in the
+macOS Keychain holds your per-machine MCP server tokens alongside your login, and `security` refuses
+to accept more than about 4096 characters through the path the bridge was using. Adding a couple of
+MCP servers pushed the blob past that, and from then on every swap was refused with "credential
+write failed; the previous account is still active and nothing changed" (correctly: nothing was
+damaged, but nothing could be switched either).
+
+- Large credential blobs are now written through a second `security` path that has no such limit,
+  so a swap succeeds whatever your MCP servers add up to. Blobs that fit the old path still use it.
+- Your MCP server tokens still survive every swap untouched, which is the whole reason the blob is
+  that big.
+- The refusal that protects you from a truncated write is still there, now at a ceiling about 17x
+  larger than the blob that broke it, and it still refuses before touching anything.
+
 ## 1.2.0 (2026-09-01)
 
 **Multi-account switcher.** For people who hold more than one Claude subscription (a personal one

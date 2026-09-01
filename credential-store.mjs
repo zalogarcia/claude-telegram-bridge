@@ -44,7 +44,8 @@
 // to tell them apart:
 //
 //   REFUSED   nothing was attempted, so nothing can be damaged (the payload is
-//             too large for `security -i`). The error carries `refused: true`.
+//             too large for EVERY write path the backend has). The error
+//             carries `refused: true`.
 //   FAILED    a write was attempted and did not land, or may have landed
 //             corrupted. The caller must read back, verify, and roll back.
 //
@@ -80,6 +81,21 @@ export const SECURITY_TIMEOUT_MS = 15_000;
 // with no claudeAiOauth in it at all.
 export const SECURITY_LINE_LIMIT = 4000; // under the observed 4096 cliff, deliberately
 
+// AND THE ESCAPE HATCH, because "refuse everything past the line buffer" is a
+// deadlock once mcpOAuth outgrows it. That is exactly what happened: a single
+// leadconnector MCP OAuth entry of 4347 characters took the blob to 5782 bytes,
+// 11633 characters encoded, and every swap was refused with the store intact
+// and the switcher useless.
+//
+// `security add-generic-password -U -a <acct> -s <svc> -X <hex>` sends the same
+// payload through argv, which has no line buffer. Measured on the same machine,
+// 2026-09-01, with a 6131-character payload: the argv form wrote it and read it
+// back byte for byte, where the `-i` form truncated the stored value at 4030.
+// macOS ARG_MAX is about 1MB, so the ceiling below is a conservative fence
+// rather than a cliff. (Piping the password to stdin with -w is NOT a third
+// option: it goes through getpass and caps at 128 characters.)
+export const ARGV_LIMIT = 200000;
+
 // The non-macOS location, and Claude Code's own fallback everywhere.
 export function defaultCredentialsPath(home = homedir()) {
   return path.join(home, '.claude', '.credentials.json');
@@ -99,7 +115,9 @@ function refuse(message) {
 // argv (and therefore never enters `ps`). -X takes the password as hex, which
 // sidesteps every quoting question about embedded JSON. This is the exact shape
 // Claude Code's own keychain writer uses; both properties are load-bearing, and
-// the accounts tests decode this exact payload.
+// the accounts tests decode this exact payload. Past the line buffer the same
+// command goes through argv instead, because a blob that fits nowhere is a
+// switcher that cannot switch: see planWrite() for the tradeoff.
 export function createKeychainStore({
   service = KEYCHAIN_SERVICE,
   account = userInfo().username,
@@ -119,29 +137,45 @@ export function createKeychainStore({
     }
   }
 
-  function buildWriteCmd(blob) {
+  // THE ONE decision point: which write path carries this payload, or neither.
+  // preflight() and write() both come through here, so a refusal and an
+  // accepted write can never disagree about what fits.
+  function planWrite(blob) {
     const hex = Buffer.from(JSON.stringify(blob), 'utf8').toString('hex');
-    return `add-generic-password -U -a "${account}" -s "${service}" -X "${hex}"\n`;
+    const cmd = `add-generic-password -U -a "${account}" -s "${service}" -X "${hex}"\n`;
+    if (cmd.length <= SECURITY_LINE_LIMIT) return { via: 'stdin', cmd, chars: cmd.length };
+
+    // THE FALLBACK, and what it costs, honestly: this hex IS visible in `ps`
+    // for the duration of the one `security` call. That is why the stdin form
+    // above stays the preferred path and keeps its own test. The exposure is
+    // accepted only here, only past the line buffer, for two reasons: the same
+    // credentials already sit in plaintext in accounts.json at 0600 for the
+    // same user, so this is not a new class of exposure, and the alternative is
+    // that account rotation stops working entirely the moment mcpOAuth grows
+    // past ~2KB, which is what it did.
+    const args = ['add-generic-password', '-U', '-a', account, '-s', service, '-X', hex];
+    const chars = args.reduce((n, a) => n + a.length + 1, 0);
+    if (chars <= ARGV_LIMIT) return { via: 'argv', args, chars };
+
+    throw refuse(
+      `the credential payload is ${chars} chars encoded, over the ${ARGV_LIMIT} limit of both security write paths; nothing was written`,
+    );
   }
 
   // Throws `refused` when write(blob) would be refused, and touches nothing.
   // Called by accounts.mjs before any side effect of a swap (its one-time
-  // backup included), so an oversized payload leaves the world exactly as it
-  // found it.
+  // backup included), so an unwritable payload leaves the world exactly as it
+  // found it. It may only refuse what BOTH paths refuse: refusing everything
+  // the stdin path could not carry is what stopped every swap on this machine.
   async function preflight(blob) {
-    const cmd = buildWriteCmd(blob);
-    if (cmd.length > SECURITY_LINE_LIMIT) {
-      throw refuse(
-        `the credential payload is ${cmd.length} chars encoded, over the ${SECURITY_LINE_LIMIT} limit of security -i; nothing was written`,
-      );
-    }
+    planWrite(blob);
   }
 
   async function write(blob) {
-    // Belt and braces: the same guard as preflight, because this store must
+    // Belt and braces: the same decision as preflight, because this store must
     // never truncate a keychain item regardless of caller discipline.
-    await preflight(blob);
-    const { code } = await runSecurity(['-i'], buildWriteCmd(blob));
+    const plan = planWrite(blob);
+    const { code } = plan.via === 'stdin' ? await runSecurity(['-i'], plan.cmd) : await runSecurity(plan.args);
     if (code !== 0) throw new Error(`security exited ${code}`);
     // A zero exit is NOT proof the item holds what was sent (the truncation
     // failure above exits 0). The caller owns read-back verification, because

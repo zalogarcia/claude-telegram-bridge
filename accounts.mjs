@@ -491,10 +491,10 @@ export function createAccountStore({
   // store is worse than a refused swap, because Claude Code then has no login
   // at all.
   async function writeCredentials(blob, { previous = undefined } = {}) {
-    // A refusal (e.g. the payload is over the `security -i` line limit on the
-    // keychain backend — see credential-store.mjs for the measured cliff) must
-    // land BEFORE any side effect, the one-time backup below included. Nothing
-    // is corrupted by a write that never runs, so this path needs no rollback.
+    // A refusal (the payload is larger than any of the backend's write paths
+    // can carry; see credential-store.mjs for the measured limits) must land
+    // BEFORE any side effect, the one-time backup below included. Nothing is
+    // corrupted by a write that never runs, so this path needs no rollback.
     if (typeof credentials.preflight === 'function') {
       try {
         await credentials.preflight(blob);

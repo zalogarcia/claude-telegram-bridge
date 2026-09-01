@@ -19,6 +19,7 @@ import path from 'node:path';
 import {
   KEYCHAIN_SERVICE,
   SECURITY_LINE_LIMIT,
+  ARGV_LIMIT,
   defaultCredentialsPath,
   createKeychainStore,
   createFileStore,
@@ -77,7 +78,13 @@ const BLOB = {
 // payload hex encoded behind -X. If the encoding regresses, this fake stops
 // parsing and the tests go red rather than silently accepting anything.
 function fakeKeychain(initialBlob) {
-  const box = { blob: initialBlob ? JSON.parse(JSON.stringify(initialBlob)) : null, writes: 0, argvPayloads: [] };
+  const box = {
+    blob: initialBlob ? JSON.parse(JSON.stringify(initialBlob)) : null,
+    writes: 0,
+    stdinWrites: 0,
+    argvWrites: 0,
+    argvPayloads: [],
+  };
   box.run = async (args, stdin = null) => {
     if (args[0] === 'find-generic-password') {
       return box.blob ? { code: 0, stdout: JSON.stringify(box.blob) } : { code: 44, stdout: '' };
@@ -87,11 +94,27 @@ function fakeKeychain(initialBlob) {
       if (!m) return { code: 1, stdout: '' };
       box.blob = JSON.parse(Buffer.from(m[3], 'hex').toString('utf8'));
       box.writes++;
+      box.stdinWrites++;
       box.lastAccount = m[1];
       box.lastService = m[2];
       return { code: 0, stdout: '' };
     }
-    // Anything reaching argv with a payload would be a `ps` leak.
+    // The argv fallback, for payloads past the `security -i` line buffer. It is
+    // decoded here too, so these tests prove the encoding rather than merely
+    // recording that a call happened. Landing here is also what the "a small
+    // blob never reaches argv" assertions are counting: argvPayloads is the
+    // `ps` exposure ledger.
+    if (args[0] === 'add-generic-password') {
+      box.argvPayloads.push(args);
+      const hex = args[args.indexOf('-X') + 1];
+      if (!/^[0-9a-f]+$/.test(hex || '')) return { code: 1, stdout: '' };
+      box.blob = JSON.parse(Buffer.from(hex, 'hex').toString('utf8'));
+      box.writes++;
+      box.argvWrites++;
+      box.lastAccount = args[args.indexOf('-a') + 1];
+      box.lastService = args[args.indexOf('-s') + 1];
+      return { code: 0, stdout: '' };
+    }
     box.argvPayloads.push(args);
     return { code: 1, stdout: '' };
   };
@@ -157,30 +180,63 @@ await t('the keychain write sends the exact security -i + hex shape, addressed c
   eq(kc.lastService, 'Claude Code-credentials');
 });
 
-await t('an oversized payload is REFUSED, marked refused, and the keychain is never touched', async () => {
+// A blob past the `security -i` line buffer. This is not a hypothetical size:
+// one leadconnector MCP OAuth entry alone measured 4347 characters, and the
+// whole blob 5782, which is what made every swap refuse.
+const OVER_LINE_LIMIT = { ...BLOB, mcpOAuth: { ...BLOB.mcpOAuth, pad: 'x'.repeat(SECURITY_LINE_LIMIT) } };
+
+await t('a payload past the line buffer is WRITTEN through argv, not refused', async () => {
+  const kc = fakeKeychain(BLOB);
+  const store = createKeychainStore({ account: 'someone', runSecurity: kc.run });
+  ok(JSON.stringify(OVER_LINE_LIMIT).length * 2 > SECURITY_LINE_LIMIT, 'this fixture must not fit the -i line');
+
+  await store.preflight(OVER_LINE_LIMIT); // must NOT throw: the argv path can carry it
+  await store.write(OVER_LINE_LIMIT);
+
+  eq(kc.argvWrites, 1, 'the oversized write must take the argv path');
+  eq(kc.stdinWrites, 0, 'the oversized write must not have been attempted on the -i line');
+  eq(kc.lastAccount, 'someone', 'the argv form must address the same account');
+  eq(kc.lastService, KEYCHAIN_SERVICE, 'the argv form must address the same service');
+  const back = await store.read();
+  eq(JSON.stringify(back), JSON.stringify(OVER_LINE_LIMIT), 'the whole oversized blob must round-trip');
+  eq(JSON.stringify(back.mcpOAuth), JSON.stringify(OVER_LINE_LIMIT.mcpOAuth), 'mcpOAuth is the reason this path exists');
+});
+
+await t('a payload that FITS the line buffer still rides stdin, never argv', async () => {
+  const kc = fakeKeychain(null);
+  const store = createKeychainStore({ account: 'someone', runSecurity: kc.run });
+  await store.write(BLOB);
+  eq(kc.stdinWrites, 1, 'a payload that fits must use the -i path');
+  eq(kc.argvWrites, 0, 'a payload that fits must NEVER reach argv, where ps can read it');
+  eq(kc.argvPayloads.length, 0, 'nothing at all may reach argv for a small payload');
+});
+
+await t('a payload past BOTH paths is REFUSED, marked refused, and the keychain is never touched', async () => {
   const kc = fakeKeychain(BLOB);
   let touched = false;
   const realRun = kc.run;
   kc.run = async (args, stdin) => {
-    if (args[0] === '-i') touched = true;
+    if (args[0] === '-i' || args[0] === 'add-generic-password') touched = true;
     return realRun(args, stdin);
   };
   const store = createKeychainStore({ account: 'someone', runSecurity: kc.run });
-  const fat = { ...BLOB, mcpOAuth: { pad: 'x'.repeat(SECURITY_LINE_LIMIT) } };
+  const fat = { ...BLOB, mcpOAuth: { pad: 'x'.repeat(ARGV_LIMIT) } };
 
-  const e1 = await throwsAsync(() => store.preflight(fat), /over the 4000 limit/);
+  const e1 = await throwsAsync(() => store.preflight(fat), /over the 200000 limit/);
   ok(e1.refused === true, 'preflight must mark the refusal so the caller knows nothing was attempted');
-  const e2 = await throwsAsync(() => store.write(fat), /over the 4000 limit/);
+  const e2 = await throwsAsync(() => store.write(fat), /over the 200000 limit/);
   ok(e2.refused === true, 'write must carry the same refused mark');
   eq(touched, false, 'a refused write must not reach the keychain at all');
   eq(JSON.stringify(kc.blob), JSON.stringify(BLOB), 'the stored credentials must be untouched');
 });
 
-await t('preflight passes a payload that fits, without writing anything', async () => {
+await t('preflight passes both writable sizes, and writes nothing either time', async () => {
   const kc = fakeKeychain(null);
   const store = createKeychainStore({ account: 'someone', runSecurity: kc.run });
   await store.preflight(BLOB);
+  await store.preflight(OVER_LINE_LIMIT); // between the two limits: the argv path's job
   eq(kc.writes, 0, 'preflight must never write');
+  eq(kc.argvPayloads.length, 0, 'preflight must not even build an argv call');
 });
 
 await t('a non-zero security exit becomes a throw WITHOUT the refused mark', async () => {
