@@ -7,7 +7,7 @@
 No tunnel. No webhook. No cloud relay. Your Mac (or Linux box) polls Telegram outbound —
 nothing inbound ever reaches it.
 
-[Install](#install) · [How it works](#how-it-works) · [Commands](#commands) · [Security](#security)
+[Install](#install) · [How it works](#how-it-works) · [Commands](#commands) · [Security](#security) · [Changelog](CHANGELOG.md)
 
 </div>
 
