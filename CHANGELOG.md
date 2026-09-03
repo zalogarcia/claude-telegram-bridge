@@ -1,6 +1,25 @@
 # Changelog
 
-All notable changes to the Claude Telegram bridge. Dates are release dates.
+All notable changes to Leash. Dates are release dates.
+
+## 1.3.0 (2026-09-03)
+
+**Renamed to Leash.** The project keeps every behaviour it had; only the name changes. "Claude
+telegram bridge" described the plumbing rather than the thing you actually use, and it could not be
+said out loud without sounding like an internal tool. Leash names what the product does: the agents
+run as far as you send them, you keep hold of the end of the line, and off-leash is the autonomous
+background mode where a worker goes and finishes a whole job on its own.
+
+- The README, the docs and the bot's own help and log text now say Leash.
+- New brand artwork lives in `docs/assets/`, and the README leads with it.
+- **Nothing on disk was renamed.** The service label `com.claude-telegram-bridge`, the default
+  clone directory `~/claude-telegram-bridge`, the log file, `config.json`, `accounts.json`, the
+  `BRIDGE_*` environment variables and `bridge.mjs` itself all keep their existing names. Upgrading
+  changes no paths and no configuration: pull, and carry on.
+- Those internal names are expected to migrate in a later release, with an upgrade path. Renaming
+  them now would break every install that exists.
+- Once the GitHub repository is renamed, old clone URLs keep working through GitHub's own redirect,
+  so existing checkouts and any script that clones the old path are unaffected.
 
 ## 1.2.1 (2026-09-01)
 
