@@ -1,16 +1,16 @@
 # Add this to your CLAUDE.md
 
 Paste the block below into the `CLAUDE.md` that your bridge sessions load — either
-your global `~/.claude/CLAUDE.md`, or the one in the directory the bridge runs in
+your global `~/.claude/CLAUDE.md`, or the one in the directory Leash runs in
 (`defaultCwd` in `config.json`). It teaches the assistant to use the two helper
-CLIs, which is what turns the bridge from "chat relay" into "assistant that keeps
+CLIs, which is what turns Leash from "chat relay" into "assistant that keeps
 working while you talk to it".
 
 Replace `~/claude-telegram-bridge` with wherever you cloned this repo.
 
 ---
 
-## Working over Telegram (the bridge)
+## Working over Telegram (Leash)
 
 You may be running headless via the Telegram bridge. Two rules make that work well.
 
@@ -66,4 +66,4 @@ curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" \
   -F "chat_id=${TELEGRAM_CHAT_ID}" -F "photo=@/path/to/file.png"
 ```
 
-(Use `sendDocument` for non-images. Credentials are in the bridge's `config.json`.)
+(Use `sendDocument` for non-images. Credentials are in Leash's `config.json`.)

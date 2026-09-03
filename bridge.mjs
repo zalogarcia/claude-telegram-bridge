@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Claude Code <-> Telegram bridge.
+// Leash: Claude Code <-> Telegram.
 // Long-polls the Telegram Bot API (outbound only — no tunnel/webhook needed) and
 // runs incoming messages through headless Claude Code (`claude -p --resume`) with
 // per-chat session continuity. Progress streams back via throttled message edits.
@@ -143,7 +143,7 @@ const DEFAULT_YOLO = String(conf('yolo', 'true')) !== 'false';
 const OWNER_NAME = conf('ownerName', 'the owner');
 // The IANA timezone /account, /usage and /status render reset clocks in
 // (e.g. "America/New_York"). Empty = this machine's local zone. Set it when
-// you read the bridge from a different timezone than the machine runs in.
+// you read Leash from a different timezone than the machine runs in.
 const OWNER_TZ = conf('ownerTz', '') || undefined;
 const OPENAI_KEY_CONF = conf('openaiApiKey', '');
 const SELFTEST = process.argv.includes('--selftest');
@@ -870,7 +870,7 @@ const COMPACT_PROMPT =
 
 // ---------- commands ----------
 
-// Commands the bridge handles itself; every OTHER /command passes through to
+// Commands Leash handles itself; every OTHER /command passes through to
 // Claude Code as the prompt (custom slash commands work in headless mode).
 const RESERVED_COMMANDS = new Set([
   '/start',
@@ -984,7 +984,7 @@ function recordBgResult(prompt, result) {
 
 // ---------------------------------------------------------------------------
 // MULTIPLE CLAUDE ACCOUNTS. For owners who hold more than one Claude
-// subscription (a personal plan and a work plan, say), the bridge can bank
+// subscription (a personal plan and a work plan, say), Leash can bank
 // each account's credentials in a named slot (/account capture <name>) and
 // swap which one is live (/account <name>, or a button tap). A usage limit
 // does not invalidate credentials — the limited account's tokens stay valid
@@ -1095,7 +1095,7 @@ async function handleLimitDeath(task, outcome) {
   handBackToChat(
     task,
     [detail, '', `--- BRIDGE ACCOUNT ROTATION ---`, ...lines].join('\n'),
-    'died on a session limit; the bridge handled the account rotation',
+    'died on a session limit; Leash handled the account rotation',
   );
 }
 
@@ -1175,7 +1175,7 @@ const NO_ACCOUNTS_VIEW = [
   'Setup, once per account: log into it normally (claude.ai + /login), then run',
   '/account capture <name>',
   '',
-  'Repeat for each Claude subscription you hold, and the bridge can swap between them (and rotate automatically when one hits its session limit).',
+  'Repeat for each Claude subscription you hold, and Leash can swap between them (and rotate automatically when one hits its session limit).',
 ].join('\n');
 
 async function renderAccountView(status = null) {
@@ -1567,8 +1567,8 @@ const BOT_COMMANDS = [
   { command: 'model', description: 'Show or set the model' },
   { command: 'cd', description: 'Set working directory (resets session)' },
   { command: 'stop', description: 'Kill current task + discard queue' },
-  { command: 'restart', description: 'Restart the bridge daemon' },
-  { command: 'logs', description: 'Tail the bridge daemon log' },
+  { command: 'restart', description: 'Restart the Leash daemon' },
+  { command: 'logs', description: 'Tail the Leash daemon log' },
   { command: 'remind', description: 'Schedule a reminder or task (daily/once/in)' },
   { command: 'schedules', description: 'List scheduled reminders & tasks' },
   { command: 'unschedule', description: 'Remove a schedule by id' },
@@ -1583,11 +1583,11 @@ const BOT_COMMANDS = [
   { command: 'help', description: 'All commands' },
 ];
 
-const HELP = `Claude Code bridge on ${hostname()}
+const HELP = `Leash on ${hostname()}
 
 Send any text → runs it in your Claude Code session (streams progress, replies with the result).
 
-Bridge commands:
+Leash commands:
 /new [bg|all] — fresh chat (the old one is archived, not deleted)
 /chats — last 30 chats by name + id · /rename <name> — name the current chat
 /resume <name|id> — switch back to any archived chat
@@ -1599,7 +1599,7 @@ Bridge commands:
 /usage — live 5h-block and weekly plan usage for EVERY captured Claude account (which one still has headroom)
 /status — live status: cwd, session, model + what every lane is doing right now
 /stop [bg|all] — kill the running task (chat lane by default)
-/restart — restart the bridge daemon itself (if something feels stuck)
+/restart — restart the Leash daemon itself (if something feels stuck)
 /logs — last lines of the daemon log
 /remind daily HH:MM <text> · /remind once [date] HH:MM <text> · /remind in 2h <text> — prefix text with "run:" to execute as a Claude task
 /schedules — list scheduled · /unschedule <id> — remove
@@ -1611,7 +1611,7 @@ Any other /command goes straight to Claude Code — your custom commands work:
 
 Unlimited background workers: long jobs (/goal, /autopilot, /qa-loop, /bug, /go-live), scheduled tasks and anything prefixed "bg:" each get a 🌙 worker — if one is busy, a new one spawns, so nothing ever queues behind background work and the 🤖 chat lane stays free. Every worker is fresh and self-contained — nothing is resumed between jobs — and gets an hour-scale timeout instead of the chat lane's ${Math.round(TASK_TIMEOUT_MS / 60000)}-minute ceiling.
 
-Attachments: photos, videos, and files (≤20MB each) are saved to the bridge inbox and handed to Claude — a caption (or a text sent right after) is the instruction. Voice notes are transcribed (Whisper) and run as prompts — just talk. Messages sent while a task runs are steered INTO the running task, like typing mid-task in Claude Code (it folds them into the current work, or answers them right after); anything that can't be steered queues (max 5). /stop kills the task and discards the queue. Default model: ${DEFAULT_MODEL || 'CLI default'} (effort ${DEFAULT_EFFORT || 'CLI default'}).
+Attachments: photos, videos, and files (≤20MB each) are saved to the Leash inbox and handed to Claude — a caption (or a text sent right after) is the instruction. Voice notes are transcribed (Whisper) and run as prompts — just talk. Messages sent while a task runs are steered INTO the running task, like typing mid-task in Claude Code (it folds them into the current work, or answers them right after); anything that can't be steered queues (max 5). /stop kills the task and discards the queue. Default model: ${DEFAULT_MODEL || 'CLI default'} (effort ${DEFAULT_EFFORT || 'CLI default'}).
 
 Notes: one chat-lane task at a time (background workers unlimited) · messages older than ${Math.round(STALE_SEC / 60)} min are skipped · only works while this machine is awake.`;
 
@@ -1909,7 +1909,7 @@ async function handleCommand(text) {
         const brief = accountUsage.peek(parts[0]);
         const r = await accounts.swapTo(parts[0]);
         // Choosing an account by hand overrides the "everything is limited"
-        // stand-down; you can see something the bridge cannot.
+        // stand-down; you can see something Leash cannot.
         if (r.ok) {
           rotationPausedUntil = 0;
           rotationCooldownUntil = 0;

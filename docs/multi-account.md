@@ -1,6 +1,6 @@
 # Multiple Claude accounts
 
-The bridge can hold credentials for more than one Claude subscription and switch
+Leash can hold credentials for more than one Claude subscription and switch
 which one Claude Code runs as. This page is the full detail behind the
 [README section](../README.md#multiple-claude-accounts).
 
@@ -60,7 +60,7 @@ has no captured credentials.
 ## Automatic rotation
 
 When a **background worker** dies and its failure output carries a session-limit
-message, the bridge:
+message, Leash:
 
 1. marks the active account limited until the reset time parsed from the
    message (or a stated one-hour guess if it can't be parsed),
@@ -93,7 +93,7 @@ Everything in the design exists to make that outcome unreachable:
   (atomically, 0600) *before* it is used for anything. If the write fails, the
   account is reported broken — loudly — rather than shown a usage number.
 - **Never refresh the live account.** The running Claude Code session owns the
-  live account's tokens and refreshes them itself; the bridge reads the live
+  live account's tokens and refreshes them itself; Leash reads the live
   token from the credential store and never races the session.
 - **Refresh idle accounts at most once per read**, and only when the access
   token has actually expired. No retry loops — a second attempt would burn a
@@ -102,18 +102,18 @@ Everything in the design exists to make that outcome unreachable:
   before every swap.
 
 If it ever happens anyway (a slot captured weeks ago whose refresh token
-expired while the bridge was off, for example): log into that account normally,
+expired while Leash was off, for example): log into that account normally,
 then `/account capture <name>`. That banks the fresh tokens and the slot is
 healthy again.
 
 ## Guardrails
 
 - **A write that can't be verified is rolled back.** After every credential
-  write the bridge reads the store back and compares fingerprints; a write that
+  write Leash reads the store back and compares fingerprints; a write that
   didn't land, or landed corrupted, gets the previous credentials restored, and
   the error message tells you which of the two actually happened — it never
   claims "nothing changed" on faith.
-- **One-time backup.** Before the first credential write the bridge ever
+- **One-time backup.** Before the first credential write Leash ever
   performs on a machine, the live blob is copied to `accounts.backup.json`
   (0600, gitignored, never overwritten). If a write corrupts the store AND the
   rollback fails — the worst case — that file's `blob` key is your pre-bridge
@@ -130,7 +130,7 @@ healthy again.
   writes go to a temp file and land via an atomic rename, so the credentials
   file is never half-written.
 - **Unidentified credentials are parked, never guessed at.** A credential blob
-  the bridge cannot attribute (by token match or by Anthropic's profile
+  Leash cannot attribute (by token match or by Anthropic's profile
   endpoint) is parked in `accounts.unclaimed.json` rather than banked into a
   named slot — banking someone's fresh login under the wrong name is how a
   later swap delivers the wrong account. `/account` shows a warning line while
@@ -144,7 +144,7 @@ healthy again.
 
 ## Privacy
 
-Credentials never leave your machine. The bridge's only network calls for this
+Credentials never leave your machine. Leash's only network calls for this
 feature are to Anthropic's own OAuth endpoints (`/api/oauth/usage`,
 `/api/oauth/profile`, and the token refresh endpoint), authenticated with your
 own tokens. Nothing is sent to Telegram except the rendered views — which, per

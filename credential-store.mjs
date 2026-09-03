@@ -205,7 +205,7 @@ function defaultRunSecurity(args, stdin = null) {
 // PLAINTEXT FILE (Linux, Windows, WSL, and anywhere else Claude Code runs)
 //
 // The file IS the credential store on those platforms — this module did not
-// choose plaintext, Claude Code did. What it can control is that the bridge
+// choose plaintext, Claude Code did. What it can control is that Leash
 // never makes the exposure worse: the write goes to a sibling temp file at
 // 0600 and is renamed into place — rename(2) within a directory is atomic, so
 // a reader never sees a half-written file and a failure mid-write cannot

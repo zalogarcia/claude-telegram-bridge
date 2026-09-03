@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Interactive installer for claude-telegram-bridge.
+# Interactive installer for Leash.
 # Creates config.json, installs the background service, and starts it.
 #
 #   ./install.sh              interactive
@@ -33,7 +33,7 @@ die()  { printf '  \033[31m✗\033[0m %s\n' "$*" >&2; exit 1; }
 run()  { if [ "$DRY_RUN" = 1 ]; then echo "  [dry-run] $*"; else eval "$@"; fi; }
 
 echo
-bold "claude-telegram-bridge — installer"
+bold "Leash — installer"
 echo
 
 # ---------- 1. prerequisites ----------

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Restart the bridge service WITHOUT killing an in-flight run.
+# Restart the Leash service WITHOUT killing an in-flight run.
 #
 # Polls until the daemon has no claude child processes (no run in progress),
 # then restarts the service. Prefer this over a fixed-delay restart

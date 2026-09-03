@@ -31,7 +31,7 @@ Requires `jq`. Write via a temp file and `mv` so `/context` can never read a hal
 
 That's it. The next time any interactive Claude Code session renders its footer, the cache appears and `/context` starts reporting limits.
 
-To cache somewhere else, point the bridge at it with `BRIDGE_RATE_LIMIT_CACHE=/path/to/rate-limits.json`.
+To cache somewhere else, point Leash at it with `BRIDGE_RATE_LIMIT_CACHE=/path/to/rate-limits.json`.
 
 ## How fresh is it?
 

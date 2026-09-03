@@ -1,5 +1,5 @@
 #!/bin/bash
-# Watchdog for claude-telegram-bridge: if the daemon's heartbeat file goes stale
+# Watchdog for Leash: if the daemon's heartbeat file goes stale
 # (process wedged — a plain crash is already covered by KeepAlive/Restart), the
 # service is restarted and you get a Telegram notification.
 #
@@ -20,7 +20,7 @@ CONFIG="$DIR/config.json"
 LABEL="${BRIDGE_SERVICE_LABEL:-com.claude-telegram-bridge}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 GUI="gui/$(id -u)"
-MAX_AGE=240      # the bridge writes the heartbeat every poll iteration AND per update
+MAX_AGE=240      # Leash writes the heartbeat every poll iteration AND per update
 STRIKE_TTL=700   # ~2x the 300s check interval
 MAX_FAILS=3      # after this many failed restarts, stop paging on every tick
 
@@ -78,7 +78,7 @@ else
   case "$fails" in ''|*[!0-9]*) fails=0 ;; esac
   fails=$((fails + 1))
   echo "$fails" > "$FAILS"
-  outcome="restart attempt #$fails did NOT recover (service restart ok=$restarted, heartbeat still ${age}s stale) — check the bridge log"
+  outcome="restart attempt #$fails did NOT recover (service restart ok=$restarted, heartbeat still ${age}s stale) — check the Leash log"
   emoji="🚨"
   if [ "$fails" -gt "$MAX_FAILS" ]; then
     log "$outcome (suppressing further alerts)"
