@@ -1,6 +1,6 @@
 # Add this to your CLAUDE.md
 
-Paste the block below into the `CLAUDE.md` that your bridge sessions load — either
+Paste the block below into the `CLAUDE.md` that your Leash sessions load — either
 your global `~/.claude/CLAUDE.md`, or the one in the directory Leash runs in
 (`defaultCwd` in `config.json`). It teaches the assistant to use the two helper
 CLIs, which is what turns Leash from "chat relay" into "assistant that keeps
@@ -12,7 +12,7 @@ Replace `~/claude-telegram-bridge` with wherever you cloned this repo.
 
 ## Working over Telegram (Leash)
 
-You may be running headless via the Telegram bridge. Two rules make that work well.
+You may be running headless via Leash. Two rules make that work well.
 
 **1. Stay reachable — hand long jobs to the background lane.** Decide this BEFORE
 your first tool call. If a request will take more than ~2 minutes (test suites,

@@ -116,7 +116,7 @@ healthy again.
 - **One-time backup.** Before the first credential write Leash ever
   performs on a machine, the live blob is copied to `accounts.backup.json`
   (0600, gitignored, never overwritten). If a write corrupts the store AND the
-  rollback fails — the worst case — that file's `blob` key is your pre-bridge
+  rollback fails — the worst case — that file's `blob` key is your pre-existing
   login, and the failure message points at it.
 - **macOS payload-size handling.** The preferred Keychain write rides one
   `security -i` line with a measured ~4096-character limit; past it the stored
@@ -167,7 +167,7 @@ please file an issue with what you find either way.
 | file | what | committed? |
 |---|---|---|
 | `accounts.json` | the enrolled slots (real tokens) | **never** — gitignored, 0600 |
-| `accounts.backup.json` | one-time pre-bridge credential backup | **never** — gitignored, 0600 |
+| `accounts.backup.json` | one-time pre-existing credential backup | **never** — gitignored, 0600 |
 | `accounts.unclaimed.json` | parked unidentified credentials, if any | **never** — gitignored, 0600 |
 | `accounts.example.json` | the shape, with fake values | yes |
 | `accounts.mjs`, `account-usage.mjs`, `account-buttons.mjs`, `credential-store.mjs` | the logic (no secrets) | yes |

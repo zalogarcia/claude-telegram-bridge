@@ -7,9 +7,9 @@
 
 ## Why the setup is needed
 
-Claude Code hands the rate-limit block to your **statusline command's stdin** and nowhere else. There is no CLI for it and no state file on disk. A bridge run is headless — it has no statusline — so it cannot ask for those numbers itself.
+Claude Code hands the rate-limit block to your **statusline command's stdin** and nowhere else. There is no CLI for it and no state file on disk. A Leash run is headless — it has no statusline — so it cannot ask for those numbers itself.
 
-The fix is to have your statusline cache what it already receives. The bridge reads the cache.
+The fix is to have your statusline cache what it already receives. Leash reads the cache.
 
 ## Setup
 
@@ -18,7 +18,7 @@ Add this to your statusline script (`statusLine.command` in `~/.claude/settings.
 ```bash
 input=$(cat)   # you almost certainly have this line already
 
-# Cache the rate-limit block so headless tools (the Telegram bridge's /context)
+# Cache the rate-limit block so headless tools (Leash's /context)
 # can show the same limits this footer does.
 mkdir -p "$HOME/.claude/cache"
 printf '%s' "$input" | jq -c --argjson now "$(date +%s)" \

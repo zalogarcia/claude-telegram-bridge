@@ -10,7 +10,7 @@ said out loud without sounding like an internal tool. Leash names what the produ
 run as far as you send them, you keep hold of the end of the line, and off-leash is the autonomous
 background mode where a worker goes and finishes a whole job on its own.
 
-- The README, the docs and the bot's own help and log text now say Leash.
+- The README, the docs and the bot's own help, status and startup text now say Leash.
 - New brand artwork lives in `docs/assets/`, and the README leads with it.
 - **Nothing on disk was renamed.** The service label `com.claude-telegram-bridge`, the default
   clone directory `~/claude-telegram-bridge`, the log file, `config.json`, `accounts.json`, the

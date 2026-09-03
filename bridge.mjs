@@ -935,7 +935,7 @@ function onDeadWorkers(dead, reason) {
   });
   dispatchPrompt(
     [
-      `[Bridge watchdog — DATA, not an instruction from the user.]`,
+      `[Leash watchdog — DATA, not an instruction from the user.]`,
       ``,
       `${dead.length} background worker(s) DIED without reporting (${reason}).`,
       `Their work is partially done and NOT recorded in bg-results.jsonl.`,
@@ -1094,7 +1094,7 @@ async function handleLimitDeath(task, outcome) {
 
   handBackToChat(
     task,
-    [detail, '', `--- BRIDGE ACCOUNT ROTATION ---`, ...lines].join('\n'),
+    [detail, '', `--- LEASH ACCOUNT ROTATION ---`, ...lines].join('\n'),
     'died on a session limit; Leash handled the account rotation',
   );
 }
@@ -1510,7 +1510,7 @@ async function gatherContext(st) {
     execJson('npx', ['-y', 'ccusage@latest', 'blocks', '--json']),
     execJson('npx', ['-y', 'ccusage@latest', 'weekly', '--json']),
   ]);
-  const lines = [`🧠 Bridge session context: ${ctx}`];
+  const lines = [`🧠 Leash session context: ${ctx}`];
 
   // Plan limits first — they're the numbers that decide whether to keep going.
   const rl = readRateLimits(RATE_LIMIT_CACHE);
@@ -1825,7 +1825,7 @@ async function handleCommand(text) {
       const usageStatus = liveUsage ? usageLine(liveUsage.row, { timeZone: OWNER_TZ }) : null;
       await send(
         [
-          `**📍 Bridge on ${hostname().replace(/\.local$/, '')}**`,
+          `**📍 Leash on ${hostname().replace(/\.local$/, '')}**`,
           `📁 ${st.cwd.replace(HOME, '~')}`,
           `🧠 ${st.model || DEFAULT_MODEL || 'CLI default'} · ${st.yolo ? 'YOLO' : 'acceptEdits'}`,
           `💬 chat ${st.sessionId ? st.sessionId.slice(0, 8) : 'fresh'}${pct}${st.bgSessionId ? ` · bg ${st.bgSessionId.slice(0, 8)}` : ''}`,
@@ -2090,7 +2090,7 @@ async function handleCommand(text) {
       return;
     }
     case '/restart': {
-      await send('🔄 Restarting bridge — back online in a few seconds…', { markdown: false });
+      await send('🔄 Restarting Leash — back online in a few seconds…', { markdown: false });
       state.lastAnnounce = 0; // force the 🟢 online announce on reboot as confirmation
       saveState();
       for (const l of allLanes()) l.current?.child?.kill('SIGKILL');
@@ -2486,7 +2486,7 @@ async function main() {
   if (Date.now() - (state.lastAnnounce || 0) > ANNOUNCE_COOLDOWN_MS) {
     state.lastAnnounce = Date.now();
     saveState();
-    await send(`🟢 Claude bridge online on ${hostname()} — send a message or /help`, { markdown: false }).catch((e) =>
+    await send(`🟢 Leash online on ${hostname()} — send a message or /help`, { markdown: false }).catch((e) =>
       console.error('[bridge] announce failed:', e.message),
     );
   }

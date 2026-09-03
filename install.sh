@@ -232,7 +232,7 @@ elif [ "$OS" = "Linux" ] && command -v systemctl >/dev/null 2>&1; then
     mkdir -p "$UNIT_DIR"
     cat > "$UNIT_DIR/$LABEL.service" <<EOF
 [Unit]
-Description=Claude Code Telegram bridge
+Description=Leash (Claude Code on Telegram)
 After=network-online.target
 
 [Service]
@@ -247,7 +247,7 @@ WantedBy=default.target
 EOF
     cat > "$UNIT_DIR/$WATCHDOG_LABEL.service" <<EOF
 [Unit]
-Description=Claude Telegram bridge watchdog
+Description=Leash watchdog
 
 [Service]
 Type=oneshot
@@ -256,7 +256,7 @@ ExecStart=/bin/bash $DIR/watchdog.sh
 EOF
     cat > "$UNIT_DIR/$WATCHDOG_LABEL.timer" <<EOF
 [Unit]
-Description=Run the Claude Telegram bridge watchdog every 5 minutes
+Description=Run the Leash watchdog every 5 minutes
 
 [Timer]
 OnBootSec=5min

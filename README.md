@@ -299,9 +299,10 @@ BRIDGE_SIBLING_REPO=/path/to/sibling ./scripts/check-shared.sh
 Leash, but the on-disk identifiers are deliberately unchanged in this release:
 the service label `com.claude-telegram-bridge`, the default clone directory
 `~/claude-telegram-bridge`, the log file name, the `BRIDGE_*` environment
-variables and the `bridge.mjs` entry point. Renaming those would break every
-existing install, so they migrate in a later release with an upgrade path.
-Nothing you have configured needs to change today.
+variables, the `bridge.mjs` entry point, the `config.json` / `accounts.json` /
+`bg-inflight.json` state files and the `.bridge-paused` pause sentinel.
+Renaming those would break every existing install, so they migrate in a later
+release with an upgrade path. Nothing you have configured needs to change today.
 
 **`config.json` options:** `model`, `effort` (empty = your CLI defaults),
 `defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `timeoutMs` (chat lane, default
@@ -341,8 +342,9 @@ force a restart while real background work is in flight. See
 ## Name
 
 This project was called **claude-telegram-bridge** until 2026-09-03. It is now
-**Leash**. Old clone URLs keep working: GitHub redirects a renamed repository, so
-an existing checkout and any script that clones the old path carry on unchanged.
+**Leash**. Once the GitHub repository itself is renamed, old clone URLs keep
+working through GitHub's own redirect, so an existing checkout and any script
+that clones the old path carry on unchanged.
 
 Why a bulldog: the agents run far and you hold the end of the line. Off-leash is
 the autonomous mode, where a worker goes and does the whole job on its own.

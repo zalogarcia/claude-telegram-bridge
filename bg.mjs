@@ -4,7 +4,7 @@
 //   node bg.mjs "run the full test suite and report what fails"
 //   node bg.mjs --file ./brief.md          # preferred for anything longer
 //
-// The bridge daemon drains this drop-box each poll cycle (≤~1 min) and runs the
+// The Leash daemon drains this drop-box each poll cycle (≤~1 min) and runs the
 // text in its own background Claude session, streaming progress to Telegram.
 // The calling session is free immediately.
 //
