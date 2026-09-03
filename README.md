@@ -1,8 +1,12 @@
 <div align="center">
 
-# claude-telegram-bridge
+<img src="docs/assets/readme-banner-1280x358.png" alt="Leash: Claude Code and Codex on Telegram" width="820">
 
-**Talk to Claude Code on your own machine, from your phone, over Telegram.**
+# Leash
+
+**Claude Code and Codex on Telegram. Always on, parallel, steerable, never rate-limited.**
+
+**STAY. FETCH. OFF-LEASH.**
 
 No tunnel. No webhook. No cloud relay. Your Mac (or Linux box) polls Telegram outbound —
 nothing inbound ever reaches it.
@@ -33,7 +37,7 @@ bot ▸ Two tests fail on the same cause: validateCart() returns early when
 
 Claude Code is the best pair programmer available, and it's stuck on your desk.
 Every "remote Claude" option asks you to expose a port, run a tunnel, or ship
-your code to someone else's machine. This does none of that: it's ~2,000 lines
+your code to someone else's machine. Leash does none of that: it's ~2,000 lines
 of Node that long-polls the Telegram Bot API and pipes messages into
 `claude -p`. The only network traffic is your machine calling Telegram.
 
@@ -50,7 +54,7 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 | 🎙️ **Voice notes** | Talk instead of typing. Transcribed with Whisper, run as a prompt. |
 | 📎 **Files & photos** | Send a screenshot with "why does this look broken?" — images, PDFs, code, anything ≤20MB. |
 | ⏰ **Reminders & cron** | "Remind me at 8" or "every morning summarize yesterday's commits" — the second one actually runs. |
-| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap — and when the active account is rate limited, the bridge rotates background work to one that isn't. [Details.](docs/multi-account.md) |
+| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap — and when the active account is rate limited, Leash rotates background work to one that isn't. [Details.](docs/multi-account.md) |
 | 🩺 **Self-healing** | KeepAlive restarts crashes; a two-strike watchdog catches wedges and tells you it did. |
 | 🎛️ **Full CLI access** | Your custom slash commands work. Switch models mid-conversation. Check usage. |
 
@@ -76,7 +80,7 @@ Preview what it would do without touching anything:
 ./install.sh --dry-run
 ```
 
-**Optional — voice notes:** `export OPENAI_API_KEY=…` (the bridge reads your shell
+**Optional — voice notes:** `export OPENAI_API_KEY=…` (Leash reads your shell
 profile, since service managers don't). Without a key, voice notes are handed to
 Claude as audio files instead.
 
@@ -108,7 +112,8 @@ your reminders in plain English.
 process until it finishes — so a 20-minute `/autopilot` would normally mean 20
 minutes of silence. Long commands, anything prefixed `bg:`, scheduled tasks, and
 assistant-initiated handoffs run in their own Claude session instead. You keep
-chatting while they work.
+chatting while they work. That is the off-leash half of the name: the work runs
+far, you keep hold of the end.
 
 The background pool is **unbounded**: every job that arrives while the pool is
 busy spawns its own worker (`bg2`, `bg3`, …) rather than queueing. Workers are
@@ -171,19 +176,19 @@ Claude task instead of just pinging you. Messages sent while a lane is busy are
 steered into the running task; anything that can't be steered queues (max 5) and
 runs in order.
 
-`/compact` is the bridge's own implementation, not the interactive built-in: it
+`/compact` is Leash's own implementation, not the interactive built-in: it
 asks the current session for a handoff summary, archives that session, and opens
-a fresh one primed with the summary. The bridge's `/usage` goes further than the
+a fresh one primed with the summary. Leash's `/usage` goes further than the
 interactive screen: it reads live plan usage for every enrolled account, not just
 the one currently logged in.
 
 ## Multiple Claude accounts
 
 If you legitimately hold more than one Claude subscription — a personal plan and
-a work plan, say — the bridge can hold credentials for each and switch which one
+a work plan, say — Leash can hold credentials for each and switch which one
 Claude Code runs as. This is a **multi-account switcher**, not a way around
 anyone's plan limits: each account keeps exactly the limits you pay for, and
-when one is rate limited the bridge simply lets background work continue on
+when one is rate limited Leash simply lets background work continue on
 another subscription you own until the first one's window resets.
 
 One-time setup, once per account:
@@ -195,12 +200,12 @@ One-time setup, once per account:
 After that: `/account` shows every enrolled account with its live headroom and
 one-tap swap buttons; `/account <name>` swaps by text; `/usage` is the full
 per-account usage view; and when a background worker dies on a session limit,
-the bridge marks that account limited and rotates new work to the
+Leash marks that account limited and rotates new work to the
 least-recently-used account that still has headroom. Workers already running are
 never killed by a swap — only new ones pick up the new account.
 
 **Credentials never leave your machine.** Enrolled accounts live in
-`accounts.json` next to the bridge (chmod 600, gitignored — see
+`accounts.json` next to `bridge.mjs` (chmod 600, gitignored — see
 [accounts.example.json](accounts.example.json) for the shape); the live login
 lives where Claude Code itself keeps it — the **macOS Keychain** on a Mac,
 `~/.claude/.credentials.json` (0600) elsewhere. The only network calls are to
@@ -212,14 +217,14 @@ accordingly.
 **The sharpest edge — refresh-token rotation.** When a Claude Code session
 refreshes an account's access token, the *refresh token rotates too*: the old
 one dies the moment the new one is issued. A rotated token that is not saved
-means that account cannot log in again without a manual `claude /login`. The
-bridge is built around never letting that happen — every swap re-banks the
+means that account cannot log in again without a manual `claude /login`. Leash
+is built around never letting that happen — every swap re-banks the
 outgoing account's live tokens *before* installing the incoming ones, refreshed
 tokens are persisted before first use, the live account is never refreshed
-behind the running session's back, and before the bridge's first-ever credential
+behind the running session's back, and before Leash's first-ever credential
 write it saves a one-time backup (`accounts.backup.json`) of your pre-existing
-login. If an account does end up locked out (say its slot went stale while the
-bridge was off for weeks), the fix is always the same and always works: log into
+login. If an account does end up locked out (say its slot went stale while Leash
+was off for weeks), the fix is always the same and always works: log into
 that account by hand, then `/account capture <name>` it again.
 
 Full detail — what a swap actually writes, the MCP-token guarantee, the drift
@@ -243,7 +248,7 @@ code on your machine.
   `"yolo": "false"` in config.json) switches to `acceptEdits` if you'd rather have
   the friction. Understand what you're choosing.
 - **The bot token** lives only in `config.json` (chmod 600, gitignored). It can't
-  make your machine execute anything — the bridge only acts on messages from your
+  make your machine execute anything — Leash only acts on messages from your
   chat — but someone holding it could read what you send the bot. Revoke via
   @BotFather if it leaks.
 - **Untrusted content is fenced.** Background worker output is delivered inside
@@ -290,6 +295,14 @@ BRIDGE_SIBLING_REPO=/path/to/sibling ./scripts/check-shared.sh
 ./uninstall.sh
 ```
 
+**Internal names still say `claude-telegram-bridge`.** The product is called
+Leash, but the on-disk identifiers are deliberately unchanged in this release:
+the service label `com.claude-telegram-bridge`, the default clone directory
+`~/claude-telegram-bridge`, the log file name, the `BRIDGE_*` environment
+variables and the `bridge.mjs` entry point. Renaming those would break every
+existing install, so they migrate in a later release with an upgrade path.
+Nothing you have configured needs to change today.
+
 **`config.json` options:** `model`, `effort` (empty = your CLI defaults),
 `defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `timeoutMs` (chat lane, default
 30 min), `bgTimeoutMs` (background workers, default 8h — that lane is for
@@ -324,6 +337,15 @@ force a restart while real background work is in flight. See
   (the daemon backs off and recovers, but don't do it on purpose).
 - Tested on macOS with Claude Code 2.x. The Linux/systemd path is included and
   structurally sound but less battle-tested — issues and PRs welcome.
+
+## Name
+
+This project was called **claude-telegram-bridge** until 2026-09-03. It is now
+**Leash**. Old clone URLs keep working: GitHub redirects a renamed repository, so
+an existing checkout and any script that clones the old path carry on unchanged.
+
+Why a bulldog: the agents run far and you hold the end of the line. Off-leash is
+the autonomous mode, where a worker goes and does the whole job on its own.
 
 ## License
 
