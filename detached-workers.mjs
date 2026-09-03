@@ -20,14 +20,23 @@
 //   • own process group (detached: true) — daemon signals never reach the worker
 //   • stdout/stderr to a FILE, not a pipe — nothing left to break when the
 //     daemon dies
-//   • stdin written once and closed — no live parent needed to keep it fed, and
-//     the CLI exits on stdin close, so a detached worker can finish alone
+//   • stdin written once and then LEFT OPEN, so the daemon can steer the worker
+//     mid-run (2026-09-03; it used to be closed at spawn, which made a
+//     dispatched worker unreachable and turned every correction into a kill plus
+//     a re-dispatch that threw the warm context away). This does not re-couple
+//     the worker to the daemon: when the daemon dies the kernel closes its write
+//     end, the worker reads EOF, which is exactly what it used to get at spawn,
+//     and the CLI exits on that EOF, so a detached worker still finishes alone.
+//     The daemon ends stdin itself on the result event. Section 9 of
+//     detached-workers.test.mjs proves the orphan case with its control, and
+//     scripts/probes/steer-probe-B.mjs proves it against the real binary.
 //   • the daemon reads results by TAILING that file, and re-attaches to any
 //     still-running worker at startup (see createWorkerWatchdog/reattachLiveWorkers)
 //
 // Do NOT "simplify" this back to pipes. Pipes are what killed the video job.
 // The chat lane deliberately keeps the old shape: it is interactive, the owner
-// watches it live, and it needs stdin held open for mid-run steering.
+// watches it live, and its output belongs in a Telegram bubble rather than a
+// file. Steering is no longer what separates the two lanes; stdio is.
 //
 // ---------------------------------------------------------------------------
 // This module is SHARED VERBATIM between the public and private bridge repos
@@ -45,8 +54,10 @@ import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 
 // The ONE place that decides how a worker's stdio is wired.
-//   logPath null → chat lane, unchanged: pipes on all three fds, stdin left open
-//                  for mid-run steering, child stays in the daemon's group.
+//   logPath null → chat lane, unchanged: pipes on all three fds, child stays in
+//                  the daemon's group.
+// Both lanes leave stdin open for mid-run steering; the difference here is the
+// process group and where stdout goes, never the input pipe.
 //   logPath set  → background lane: own process group AND stdout/stderr on a
 //                  file. Both are load-bearing — a detached child still dies on
 //                  its next write if that write goes down a pipe to a dead
@@ -101,7 +112,23 @@ export function tailLines(logPath, onLine, { intervalMs = 300 } = {}) {
       }
       const parts = (carry + chunk).split('\n');
       carry = parts.pop(); // incomplete tail — wait for the rest
-      for (const line of parts) if (line.trim()) onLine(line);
+      for (const line of parts) {
+        if (!line.trim()) continue;
+        // PER LINE, not per batch. The offset above has already advanced past
+        // this whole chunk, so a line that throws is a line nobody will ever
+        // read again: with one shared try/catch, a formatter blowing up on some
+        // odd tool block also silently swallowed the `result` line sitting
+        // behind it in the same poll. That used to cost a progress entry. Since
+        // background workers started holding stdin open, the daemon seeing the
+        // result line is the ONLY thing that ends their stdin and lets them
+        // exit, so the same swallow would strand the worker for good (lane kill
+        // timers are disabled by default).
+        try {
+          onLine(line);
+        } catch (e) {
+          console.error('[bridge] tail line handler failed:', e.message);
+        }
+      }
     } catch (e) {
       console.error('[bridge] tail failed:', e.message);
     } finally {

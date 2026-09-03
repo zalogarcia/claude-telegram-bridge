@@ -376,6 +376,45 @@ console.log('\n6. tailLines — the pipe replacement');
   await sleep(100);
   t3.stop();
   ok('missing log file is tolerated', true);
+
+  // ONE BAD LINE MUST NOT EAT THE BATCH. The read offset advances past the whole
+  // chunk before any line is dispatched, so a line dropped here is gone for
+  // good. What sits behind it is the `result` line, and since background workers
+  // hold stdin open, the daemon seeing that line is the only thing that ends
+  // their stdin and lets them exit: swallowing it strands the worker forever
+  // (lane kill timers are off by default).
+  const p4 = path.join(DIR, 'tail-throw.jsonl');
+  fs.writeFileSync(p4, '');
+  const seen4 = [];
+  const t4 = tailLines(
+    p4,
+    (l) => {
+      if (l.includes('"boom"')) throw new Error('formatter blew up on a weird tool block');
+      seen4.push(l);
+    },
+    { intervalMs: 30 },
+  );
+  fs.appendFileSync(p4, '{"a":"boom"}\n{"type":"result","result":"THE ANSWER"}\n');
+  await sleep(150);
+  t4.stop();
+  ok(
+    '★ a throwing line handler does not swallow the rest of the batch (the result line still arrives)',
+    seen4.some((l) => l.includes('THE ANSWER')),
+    `handler saw: ${JSON.stringify(seen4)}`,
+  );
+
+  const p5 = path.join(DIR, 'tail-throw-2.jsonl');
+  fs.writeFileSync(p5, '');
+  const seen5 = [];
+  const t5 = tailLines(p5, (l) => (l.includes('"boom"') ? (() => { throw new Error('x'); })() : seen5.push(l)), {
+    intervalMs: 30,
+  });
+  fs.appendFileSync(p5, '{"a":"boom"}\n');
+  await sleep(120);
+  fs.appendFileSync(p5, '{"b":"after"}\n');
+  await sleep(120);
+  t5.stop();
+  ok('and the tail keeps running for later writes', seen5.length === 1 && seen5[0].includes('after'), JSON.stringify(seen5));
 }
 
 // ===========================================================================
@@ -412,7 +451,36 @@ console.log('\n8. shipped wiring — the parts that are ordering, not logic');
   ok('bg spawn goes through spawnWorker with a logPath', /spawnWorker\(CLAUDE_BIN, args, \{.*\blogPath \}\)/.test(SRC));
   ok('the raw spawn() of CLAUDE_BIN is gone from runClaude', !/spawn\(CLAUDE_BIN,/.test(SRC));
   ok('inflight record carries the log path for re-attach', /inflight\.add\([\s\S]{0,400}?log: logPath,/.test(SRC));
-  ok('bg stdin is closed at spawn (no live parent needed)', /if \(isBgLane\) child\.stdin\.end\(\);/.test(SRC));
+
+  // STDIN DISCIPLINE. Two shapes are legal and which one a repo ships decides
+  // whether its background workers can be corrected mid-run:
+  //   closed at spawn                     → fire-and-forget, unsteerable
+  //   held open, ended on the result event → steerable (see section 9)
+  // Either way the pipe must not be left dangling: the CLI only exits once
+  // stdin closes, so a worker whose stdin is never ended never finishes.
+  const closesAtSpawn = /if \(isBgLane\) child\.stdin\.end\(\);/.test(SRC);
+  const resultBranch = SRC.slice(SRC.indexOf("ev.type === 'result'"));
+  const endsOnResult = /child\.stdin\.end\(\);/.test(resultBranch);
+  ok('bg stdin is either closed at spawn or ended on the result event', closesAtSpawn || endsOnResult);
+  if (!closesAtSpawn) {
+    ok('held-open stdin: the result event ends it, on every lane', /\n\s*child\.stdin\.end\(\);/.test(resultBranch));
+    // BOTH terminal handlers, not one: a spawn failure ('error', where 'close'
+    // may never fire) leaks the pipe just as permanently as a normal exit.
+    const iErr = SRC.indexOf("child.on('error'");
+    const iClose = SRC.indexOf("child.on('close'");
+    const inErrorHandler = /closeStdin\(child\)/.test(SRC.slice(iErr, iClose));
+    const inCloseHandler = /closeStdin\(child\)/.test(SRC.slice(iClose));
+    ok('held-open stdin: both terminal handlers give the pipe back (no fd leak per run)', inErrorHandler && inCloseHandler);
+    ok('held-open stdin: a bg lane is no longer refused by the steer path', !/if \(isBgLane\) return false;/.test(SRC));
+    // A bg lane learns about its own result by tailing a log on a poll, so for
+    // one poll interval the daemon still thinks an exited worker is running.
+    // Without this check the daemon would answer "steered into bg2" for a write
+    // that went into a dead pipe and was swallowed by the stdin error handler.
+    ok(
+      'held-open stdin: steerability is refused once the child has exited (an ack must mean delivered)',
+      /run\.canSteer = \(\) =>[\s\S]{0,400}?child\.exitCode === null[\s\S]{0,120}?child\.signalCode === null/.test(SRC),
+    );
+  }
 
   const sigterm = SRC.slice(SRC.indexOf("process.on('SIGTERM'"));
   ok('★ SIGTERM no longer kills every lane', !/for \(const l of allLanes\(\)\) l\.current\?\.child\?\.kill/.test(sigterm));
@@ -434,6 +502,166 @@ console.log('\n8. shipped wiring — the parts that are ordering, not logic');
   // its own directory, and the reaper's alert delegated back to the host.
   ok('daemon builds the registry from its own INFLIGHT_FILE', /createInflightRegistry\(\{ file: INFLIGHT_FILE \}\)/.test(SRC));
   ok('daemon injects the runs dir and the dead-worker alert', /createWorkerWatchdog\(\{[\s\S]{0,400}?runsDir: RUNS_DIR,[\s\S]{0,400}?onDeadWorkers,/.test(SRC));
+}
+
+// ===========================================================================
+console.log('\n9. stdin HELD OPEN: steerable, and still finishes alone');
+// ===========================================================================
+// The load-bearing case for mid-run steering (2026-09-03). Background workers
+// used to close stdin at spawn, which made a dispatched worker unreachable: the
+// only way to correct it was `kill` plus a full re-dispatch that threw away the
+// context it had already built. Keeping the pipe open is what makes a steer
+// possible, and the fear it raises is that a worker whose parent dies now waits
+// forever on input nobody can send.
+//
+// It does not. The kernel closes the daemon's write end when the daemon dies, so
+// the worker reads EOF, exactly what it used to get at spawn, just later.
+//
+// The worker below BLOCKS on stdin until EOF before writing its result, so this
+// test cannot pass unless the EOF really arrived: if it never does, the worker
+// never exits and the assertion fails on its deadline rather than hanging.
+// The control is a worker whose parent stays ALIVE, it must still be blocked,
+// which is what proves the deadline is measuring EOF and not just time.
+{
+  const MOCK_STDIN = path.join(DIR, 'mock-claude-stdin.sh');
+  fs.writeFileSync(
+    MOCK_STDIN,
+    `#!/bin/sh
+i=0
+while [ $i -lt 2 ]; do
+  printf '%s\\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"step '"$i"'"}]}}'
+  i=$((i+1))
+  sleep 1
+done
+# Block until stdin reaches EOF. This is the CLI's own shape (it exits when its
+# input stream closes) and it is what makes the assertions below meaningful:
+# nothing past this line can happen unless the EOF really arrived.
+cat > /dev/null
+printf '%s\\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"WOKE ON STDIN EOF"}]}}'
+# Then keep WORKING for a while. A worker that woke and exited in the same
+# millisecond could not tell "survived its parent" from "died with it".
+sleep 3
+printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"STDIN EOF WORKER FINISHED","session_id":"mock-eof"}'
+exit 0
+`,
+  );
+  fs.chmodSync(MOCK_STDIN, 0o755);
+
+  // A long sleeper, spawned by the same parent AFTER the worker under test, with
+  // its own stdin pipe. If node ever let the first worker's stdin WRITE end be
+  // inherited by a later child, the first worker would not see EOF when its
+  // parent died, it would wait for this sibling too. Real daemons run several
+  // workers at once, so that leak would be the actual production failure.
+  const SIBLING = path.join(DIR, 'mock-sibling.sh');
+  fs.writeFileSync(SIBLING, `#!/bin/sh\nsleep 90\n`);
+  fs.chmodSync(SIBLING, 0o755);
+
+  const PARENT_OPEN = path.join(DIR, 'parent-stdin-open.mjs');
+  fs.writeFileSync(
+    PARENT_OPEN,
+    `import fs from 'node:fs';
+import { spawnWorker } from ${JSON.stringify(MODULE_PATH)};
+const [mock, logPath, pidFile, sibBin, sibLog, sibPidFile] = process.argv.slice(2);
+// The shipped background shape with ONE difference from the old one: stdin is
+// written and LEFT OPEN, exactly as bridge.mjs now does, so a steer can be
+// written into it later.
+const { child } = spawnWorker(mock, [], { cwd: process.cwd(), env: process.env, logPath });
+child.stdin.on('error', () => {});
+child.stdin.write(JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: 'go' }] } }) + '\\n');
+fs.writeFileSync(pidFile, String(child.pid));
+if (sibBin) {
+  const { child: sib } = spawnWorker(sibBin, [], { cwd: process.cwd(), env: process.env, logPath: sibLog });
+  sib.stdin.on('error', () => {});
+  fs.writeFileSync(sibPidFile, String(sib.pid));
+}
+setInterval(() => {}, 1000); // stay alive until killed
+`,
+  );
+
+  async function launchOpenParent(tag, withSibling) {
+    const logPath = path.join(DIR, 'runs', `${tag}.jsonl`);
+    const pidFile = path.join(DIR, `${tag}.pid`);
+    const sibPidFile = path.join(DIR, `${tag}-sibling.pid`);
+    const args = [PARENT_OPEN, MOCK_STDIN, logPath, pidFile];
+    if (withSibling) args.push(SIBLING, path.join(DIR, 'runs', `${tag}-sibling.jsonl`), sibPidFile);
+    const parent = spawn(process.execPath, args, { stdio: ['ignore', 'inherit', 'inherit'], detached: true });
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await sleep(50);
+    if (!fs.existsSync(pidFile)) throw new Error(`${tag}: parent never reported a worker pid`);
+    for (let i = 0; withSibling && i < 100 && !fs.existsSync(sibPidFile); i++) await sleep(50);
+    return {
+      parent,
+      workerPid: Number(fs.readFileSync(pidFile, 'utf8')),
+      siblingPid: withSibling && fs.existsSync(sibPidFile) ? Number(fs.readFileSync(sibPidFile, 'utf8')) : null,
+      logPath,
+    };
+  }
+
+  const held = await launchOpenParent('stdin-open', true);
+  const control = await launchOpenParent('stdin-open-control', false); // parent stays alive
+
+  await sleep(2500); // past the mock's two steps: both are now blocked on stdin
+  ok('held-open worker reached its stdin read (log has its steps)', fs.statSync(held.logPath).size > 0);
+  ok(
+    'a worker blocked on stdin has NOT woken or written a result',
+    !fs.readFileSync(held.logPath, 'utf8').includes('WOKE ON STDIN EOF'),
+  );
+
+  process.kill(-held.parent.pid, 'SIGKILL'); // the daemon dying, no cleanup at all
+  await sleep(700);
+  ok('the spawning parent really is dead', !alive(held.parent.pid));
+  ok('★ a worker with stdin HELD OPEN survives its parent being SIGKILLed', alive(held.workerPid), `pid ${held.workerPid}`);
+  ok(
+    '★ the dead parent\'s pipe delivered EOF, the worker woke and kept working',
+    fs.readFileSync(held.logPath, 'utf8').includes('WOKE ON STDIN EOF'),
+    'no EOF reached the worker: an open stdin on a dead daemon would strand it',
+  );
+
+  // Time-boxed: 60s. Fails, never hangs, if the EOF never arrives.
+  for (let i = 0; i < 240 && alive(held.workerPid); i++) await sleep(250);
+  ok(
+    '★ THE POINT: an orphaned worker reads EOF on the dead parent\'s pipe and finishes ALONE',
+    !alive(held.workerPid),
+    'still blocked on stdin 60s after its parent died, an open stdin would strand every worker',
+  );
+  const heldLog = fs.readFileSync(held.logPath, 'utf8');
+  ok('★ its result line landed in the log after the parent was gone', heldLog.includes('STDIN EOF WORKER FINISHED'));
+  ok(
+    'the re-attach path derives a clean outcome from that log',
+    bgOutcomeFromLines(heldLog.split('\n').filter(Boolean)).answer === 'STDIN EOF WORKER FINISHED',
+  );
+
+  ok(
+    '★ a SIBLING worker did not inherit the write end (it is still running, and did not gate the EOF)',
+    held.siblingPid ? alive(held.siblingPid) : false,
+    'the sibling died early, this assertion no longer proves anything',
+  );
+
+  // THE CONTROL. Same worker, same open stdin, parent still alive: it must still
+  // be blocked. Without this, "the worker exited" could just mean "time passed".
+  ok(
+    'control: with the parent ALIVE the worker is still blocked on stdin (the test can detect a missing EOF)',
+    alive(control.workerPid),
+    `control pid ${control.workerPid} exited without an EOF, the mock is not actually reading stdin`,
+  );
+  ok(
+    'control: it never woke, so the wake above was the parent death and not the clock',
+    !fs.readFileSync(control.logPath, 'utf8').includes('WOKE ON STDIN EOF'),
+  );
+
+  for (const pid of [held.siblingPid, control.workerPid]) {
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+  try {
+    process.kill(-control.parent.pid, 'SIGKILL');
+  } catch {
+    /* already gone */
+  }
 }
 
 // ---------------------------------------------------------------------------
