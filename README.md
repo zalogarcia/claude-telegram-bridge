@@ -4,10 +4,6 @@
 
 # Leash
 
-**Claude Code and Codex on Telegram. Always on, parallel, steerable, never rate-limited.**
-
-**STAY. FETCH. OFF-LEASH.**
-
 No tunnel. No webhook. No cloud relay. Your Mac (or Linux box) polls Telegram outbound —
 nothing inbound ever reaches it.
 
