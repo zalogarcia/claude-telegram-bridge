@@ -1,645 +1,378 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Leash — Claude Code, from your phone</title>
-<meta name="description" content="Leash: an always-on link between Telegram and the Claude Code running on your own machine. No tunnel, no cloud, no open ports." />
-<meta name="color-scheme" content="light dark" />
-<meta name="theme-color" content="#F4F6F8" media="(prefers-color-scheme: light)" />
-<meta name="theme-color" content="#0E1116" media="(prefers-color-scheme: dark)" />
-<link rel="canonical" href="https://zalogarcia.github.io/claude-telegram-bridge/" />
-<meta property="og:type" content="website" />
-<meta property="og:title" content="Leash — Claude Code, from your phone" />
-<meta property="og:description" content="Leash: an always-on link between Telegram and the Claude Code running on your own machine. No tunnel, no webhook, no open ports." />
-<meta property="og:url" content="https://zalogarcia.github.io/claude-telegram-bridge/" />
-<meta name="twitter:card" content="summary" />
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230E1116'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23E07A3F'/%3E%3C/svg%3E" />
-<style>
-/* ─────────────────────────────────────────────
-   Tokens. Light is the base; dark redefines them.
-   The viewer's toggle (data-theme) wins both ways.
-   ───────────────────────────────────────────── */
-:root {
-  --bg:        #F4F6F8;
-  --surface:   #FFFFFF;
-  --surface-2: #EDF1F5;
-  --line:      #DCE3EA;
-  --line-soft: #E8EDF2;
-  --text:      #10151B;
-  --dim:       #5C6875;
-  --faint:     #8B97A5;
-  --ember:     #C15A16;   /* the machine, working */
-  --ember-soft:#F3E2D5;
-  --steel:     #4E7392;   /* the remote link */
-  --shadow:    0 1px 2px rgba(16,21,27,.06), 0 12px 32px -12px rgba(16,21,27,.18);
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: "Avenir Next", Avenir, "Segoe UI", system-ui, -apple-system, sans-serif;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg:        #0E1116;
-    --surface:   #161C24;
-    --surface-2: #1C242E;
-    --line:      #262F3B;
-    --line-soft: #1E2630;
-    --text:      #E7EAEE;
-    --dim:       #98A3B1;
-    --faint:     #6C7885;
-    --ember:     #E07A3F;
-    --ember-soft:#2A1D14;
-    --steel:     #7FA0BC;
-    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 18px 40px -16px rgba(0,0,0,.6);
-  }
-}
-:root[data-theme="dark"] {
-  --bg:#0E1116; --surface:#161C24; --surface-2:#1C242E; --line:#262F3B; --line-soft:#1E2630;
-  --text:#E7EAEE; --dim:#98A3B1; --faint:#6C7885; --ember:#E07A3F; --ember-soft:#2A1D14; --steel:#7FA0BC;
-  --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 40px -16px rgba(0,0,0,.6);
-}
-:root[data-theme="light"] {
-  --bg:#F4F6F8; --surface:#FFFFFF; --surface-2:#EDF1F5; --line:#DCE3EA; --line-soft:#E8EDF2;
-  --text:#10151B; --dim:#5C6875; --faint:#8B97A5; --ember:#C15A16; --ember-soft:#F3E2D5; --steel:#4E7392;
-  --shadow:0 1px 2px rgba(16,21,27,.06), 0 12px 32px -12px rgba(16,21,27,.18);
-}
-
-* { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; }
-@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
-body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--sans);
-  font-size: 17px;
-  line-height: 1.65;
-  -webkit-font-smoothing: antialiased;
-  overflow-x: hidden; /* belt-and-braces: nothing may scroll the page sideways */
-}
-/* anchors must clear the sticky header */
-section[id] { scroll-margin-top: 4.2rem; }
-a { color: inherit; }
-::selection { background: var(--ember); color: var(--bg); }
-:focus-visible { outline: 2px solid var(--ember); outline-offset: 3px; border-radius: 2px; }
-
-.wrap { width: min(1080px, calc(100% - 2.5rem)); margin-inline: auto; }
-
-/* Section rhythm — a single owner for vertical space. */
-section { padding-block: clamp(4rem, 9vw, 7rem); }
-section + section { border-top: 1px solid var(--line-soft); }
-
-.eyebrow {
-  font-family: var(--mono);
-  font-size: .72rem;
-  letter-spacing: .16em;
-  text-transform: uppercase;
-  color: var(--faint);
-  margin: 0 0 1.1rem;
-  max-width: none; /* the rule spans the column, unlike body copy */
-  display: flex; align-items: center; gap: .7rem;
-}
-.eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--line); }
-
-h1, h2, h3 { font-family: var(--mono); font-weight: 600; letter-spacing: -.03em; text-wrap: balance; margin: 0; }
-h1 { font-size: clamp(2.1rem, 6vw, 3.6rem); line-height: 1.05; }
-h2 { font-size: clamp(1.5rem, 3.2vw, 2.1rem); line-height: 1.15; margin-bottom: 1rem; }
-h3 { font-size: 1.02rem; letter-spacing: -.01em; }
-p { margin: 0 0 1.1rem; max-width: 66ch; color: var(--dim); }
-p strong { color: var(--text); font-weight: 600; }
-.lede { font-size: 1.12rem; color: var(--dim); }
-
-/* ── Header ─────────────────────────────── */
-header.top {
-  position: sticky; top: 0; z-index: 20;
-  background: color-mix(in srgb, var(--bg) 88%, transparent);
-  backdrop-filter: blur(10px);
-  border-bottom: 1px solid var(--line-soft);
-}
-.top-in { display: flex; align-items: center; gap: 1rem; padding-block: .7rem; }
-.mark { font-family: var(--mono); font-size: .88rem; font-weight: 600; letter-spacing: -.02em; display: flex; align-items: center; gap: .55rem; min-width: 0; }
-.mark .full { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ember); box-shadow: 0 0 0 3px var(--ember-soft); flex: none; }
-.top nav { margin-left: auto; display: flex; gap: 1.3rem; align-items: center; font-size: .85rem; flex: none; }
-.top nav a { color: var(--dim); text-decoration: none; padding-block: .5rem; } /* taller tap target */
-.top nav a:hover { color: var(--text); }
-.theme-btn {
-  background: none; border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
-  color: var(--dim); width: 30px; height: 30px; display: grid; place-items: center;
-  font-size: .8rem; line-height: 1; flex: none;
-}
-.theme-btn:hover { color: var(--text); border-color: var(--faint); }
-@media (max-width: 720px) { .top nav a.hide-s { display: none; } }
-@media (max-width: 480px) {
-  .top nav { gap: .9rem; font-size: .82rem; }
-  .top nav a.hide-xs { display: none; }
-  .mark .full { font-size: .8rem; }
-}
-
-/* ── Hero ───────────────────────────────── */
-.hero { padding-top: clamp(3rem, 7vw, 5.5rem); padding-bottom: clamp(3rem, 7vw, 5rem); }
-.hero-grid { display: grid; grid-template-columns: 1fr; gap: clamp(2.5rem, 5vw, 4rem); align-items: start; }
-.hero-grid > * { min-width: 0; } /* grid children default to min-content — let them shrink */
-@media (min-width: 900px) { .hero-grid { grid-template-columns: 1.05fr .95fr; } }
-.hero h1 span { color: var(--ember); }
-.hero .lede { margin-top: 1.3rem; }
-
-.badges { display: flex; flex-wrap: wrap; gap: .5rem; margin-bottom: 1.6rem; }
-.badge {
-  font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--dim); border: 1px solid var(--line); border-radius: 100px; padding: .3rem .7rem;
-  background: var(--surface);
-}
-
-/* Install command */
-.cmd {
-  margin-top: 1.8rem; background: var(--surface); border: 1px solid var(--line);
-  border-radius: 10px; box-shadow: var(--shadow); overflow: hidden;
-}
-.cmd-head {
-  display: flex; align-items: center; gap: .6rem; padding: .55rem .9rem;
-  border-bottom: 1px solid var(--line-soft); font-family: var(--mono);
-  font-size: .68rem; letter-spacing: .14em; text-transform: uppercase; color: var(--faint);
-}
-.cmd-body { display: flex; align-items: flex-start; gap: .8rem; padding: .95rem 1rem; }
-.cmd code {
-  font-family: var(--mono); font-size: .82rem; line-height: 1.9; color: var(--text);
-  display: block;
-  flex: 1; min-width: 0; /* without min-width a flex item refuses to shrink → page-wide overflow */
-  /* The install command is the most important thing on the page — it must never
-     be clipped or hidden behind a scrollbar. Wrap, with the URL breaking cleanly. */
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.cmd code .ln { display: block; text-indent: -1.1rem; padding-left: 1.1rem; } /* hanging indent on wrap */
-@media (max-width: 620px) {
-  .cmd code { line-height: 1.75; font-size: .78rem; }
-  .cmd-body { flex-direction: column; gap: .7rem; }
-  button.copy { align-self: flex-start; }
-}
-.cmd code .p { color: var(--ember); user-select: none; }
-button.copy {
-  font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase;
-  color: var(--dim); background: var(--surface-2); border: 1px solid var(--line);
-  border-radius: 6px; padding: .5rem .75rem; cursor: pointer; flex: none;
-  transition: color .15s, border-color .15s;
-}
-button.copy:hover { color: var(--text); border-color: var(--faint); }
-button.copy.done { color: var(--ember); border-color: var(--ember); }
-
-/* ── Chat thread mock ───────────────────── */
-.thread {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
-  box-shadow: var(--shadow); overflow: hidden;
-}
-.thread-bar {
-  display: flex; align-items: center; gap: .6rem; padding: .7rem .9rem;
-  border-bottom: 1px solid var(--line-soft); background: var(--surface-2);
-}
-.avatar {
-  width: 26px; height: 26px; border-radius: 50%; flex: none;
-  background: linear-gradient(150deg, var(--ember), var(--steel));
-  display: grid; place-items: center; font-family: var(--mono); font-size: .72rem;
-  font-weight: 700; color: #fff;
-}
-.thread-bar b { font-size: .85rem; font-weight: 600; }
-.thread-bar small { font-family: var(--mono); font-size: .68rem; color: var(--faint); margin-left: auto; }
-.msgs { padding: 1rem .9rem 1.2rem; display: flex; flex-direction: column; gap: .55rem; min-height: 340px; }
-.msg { max-width: 86%; padding: .6rem .8rem; border-radius: 12px; font-size: .87rem; line-height: 1.5; overflow-wrap: anywhere; }
-@media (max-width: 420px) { .msg { max-width: 94%; font-size: .84rem; } .msgs { min-height: 320px; } }
-.msg.me { align-self: flex-end; background: var(--steel); color: #fff; border-bottom-right-radius: 4px; }
-.msg.bot { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--line-soft); border-bottom-left-radius: 4px; }
-.msg.work { font-family: var(--mono); font-size: .76rem; line-height: 1.75; }
-.msg.work .hdr { color: var(--ember); font-weight: 600; }
-.msg.work .tool { color: var(--dim); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.msg.work .sub { padding-left: 1.1rem; color: var(--faint); }
-
-/* load-in choreography */
-.reveal { opacity: 0; transform: translateY(6px); }
-.played .reveal { animation: rise .45s cubic-bezier(.2,.7,.3,1) forwards; }
-@keyframes rise { to { opacity: 1; transform: none; } }
-@media (prefers-reduced-motion: reduce) {
-  .reveal { opacity: 1; transform: none; }
-  .played .reveal { animation: none; }
-}
-
-/* ── Architecture ───────────────────────── */
-.arch { display: grid; gap: .6rem; margin-top: 2rem; font-family: var(--mono); font-size: .8rem; }
-.node {
-  border: 1px solid var(--line); background: var(--surface); border-radius: 8px;
-  padding: .8rem 1rem; display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap;
-}
-.node b { font-weight: 600; letter-spacing: -.01em; }
-.node span { color: var(--faint); font-size: .74rem; }
-.node.lane-a { border-left: 2px solid var(--ember); }
-.node.lane-b { border-left: 2px solid var(--steel); }
-.link {
-  padding-left: 1.1rem; color: var(--faint); font-size: .72rem;
-  display: flex; align-items: flex-start; gap: .5rem; line-height: 1.5;
-}
-.link::before, .link.up::before { flex: none; }
-.link::before { content: "↓"; color: var(--ember); }
-.link.up::before { content: "↑"; color: var(--steel); }
-.indent { margin-left: clamp(0px, 4vw, 2.4rem); }
-
-/* ── Feature list ───────────────────────── */
-.feats { display: grid; gap: 0; margin-top: 2rem; border-top: 1px solid var(--line-soft); }
-.feat {
-  display: grid; gap: .35rem 1.6rem; padding: 1.4rem 0;
-  border-bottom: 1px solid var(--line-soft);
-}
-@media (min-width: 760px) { .feat { grid-template-columns: 13.5rem 1fr; } }
-.feat h3 { color: var(--text); }
-.feat p { margin: 0; font-size: .95rem; }
-.feat .tag {
-  font-family: var(--mono); font-size: .66rem; letter-spacing: .12em; text-transform: uppercase;
-  color: var(--ember); display: block; margin-bottom: .2rem;
-}
-
-/* ── Steps ──────────────────────────────── */
-.steps { counter-reset: s; display: grid; gap: 1.6rem; margin-top: 2rem; }
-.step { display: grid; grid-template-columns: 2rem 1fr; gap: 1rem; align-items: start; }
-.step::before {
-  counter-increment: s; content: counter(s, decimal-leading-zero);
-  font-family: var(--mono); font-size: .78rem; color: var(--ember);
-  border: 1px solid var(--line); border-radius: 6px; width: 2rem; height: 2rem;
-  display: grid; place-items: center; background: var(--surface);
-}
-.step h3 { margin-bottom: .25rem; }
-.step p { margin: 0; font-size: .95rem; }
-.step code, .inline {
-  font-family: var(--mono); font-size: .84em; background: var(--surface-2);
-  border: 1px solid var(--line-soft); border-radius: 4px; padding: .08em .35em; color: var(--text);
-}
-
-/* ── Table ──────────────────────────────── */
-.scroll { overflow-x: auto; margin-top: 2rem; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 34rem; }
-th, td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
-th {
-  font-family: var(--mono); font-size: .68rem; letter-spacing: .14em; text-transform: uppercase;
-  color: var(--faint); font-weight: 500; background: var(--surface-2);
-}
-tr:last-child td { border-bottom: 0; }
-td:first-child { font-family: var(--mono); font-size: .82rem; color: var(--ember); white-space: nowrap; }
-td:last-child { color: var(--dim); }
-
-/* ── Security ───────────────────────────── */
-.warn {
-  border: 1px solid var(--line); border-left: 2px solid var(--ember);
-  background: var(--surface); border-radius: 8px; padding: 1.1rem 1.3rem; margin-top: 2rem;
-}
-.warn p:last-child { margin-bottom: 0; }
-.sec-list { display: grid; gap: 1.1rem; margin-top: 1.8rem; padding: 0; list-style: none; }
-.sec-list li { padding-left: 1.3rem; position: relative; color: var(--dim); font-size: .95rem; max-width: 68ch; }
-.sec-list li::before {
-  content: ""; position: absolute; left: 0; top: .62em; width: 6px; height: 6px;
-  border-radius: 1px; background: var(--steel); transform: rotate(45deg);
-}
-.sec-list b { color: var(--text); font-weight: 600; }
-
-/* ── CTA + footer ───────────────────────── */
-.cta { text-align: center; }
-.cta .cmd { max-width: 44rem; margin-inline: auto; text-align: left; }
-.btn {
-  display: inline-flex; align-items: center; gap: .5rem; margin-top: 1.6rem;
-  font-family: var(--mono); font-size: .82rem; text-decoration: none;
-  color: var(--bg); background: var(--text); border-radius: 8px; padding: .7rem 1.15rem;
-  transition: transform .15s ease;
-}
-.btn:hover { transform: translateY(-1px); }
-footer {
-  border-top: 1px solid var(--line-soft); padding-block: 2.5rem 3.5rem;
-  font-size: .82rem; color: var(--faint);
-}
-footer a { color: var(--dim); }
-.foot-in { display: flex; flex-wrap: wrap; gap: .6rem 1.6rem; align-items: baseline; }
-.foot-in .sp { margin-left: auto; }
-</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Leash. Claude Code and Codex on Telegram.</title>
+<meta name="description" content="Talk to Claude Code on your own machine, from your phone, over Telegram. No tunnel, no webhook, no cloud relay. Always on, parallel, steerable.">
+<meta name="theme-color" content="#09090B">
+<link rel="canonical" href="https://useleash.app/">
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Leash. Claude Code and Codex on Telegram.">
+<meta property="og:description" content="Always on, parallel, steerable, never rate-limited. Runs on your own machine. No tunnel, no webhook, no cloud relay.">
+<meta property="og:url" content="https://useleash.app/">
+<meta property="og:image" content="https://useleash.app/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Leash. Claude Code and Codex on Telegram.">
+<meta name="twitter:description" content="Always on, parallel, steerable, never rate-limited. Runs on your own machine.">
+<meta name="twitter:image" content="https://useleash.app/og.png">
+<link rel="stylesheet" href="styles.css">
+<script src="script.js" defer></script>
 </head>
 <body>
-<script>
-// Apply the saved theme before first paint so there's no flash.
-try {
-  var t = localStorage.getItem("ctb-theme");
-  if (t) document.documentElement.setAttribute("data-theme", t);
-} catch (e) {}
-</script>
+<div class="stars" aria-hidden="true"></div>
 
-<header class="top">
-  <div class="wrap top-in">
-    <span class="mark"><span class="dot"></span><span class="full">Leash</span></span>
-    <nav>
-      <a href="#how" class="hide-s">How it works</a>
-      <a href="#install" class="hide-xs">Install</a>
-      <a href="#security" class="hide-xs">Security</a>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="#top">
+      <img src="assets/face-icon.webp" alt="" width="192" height="192" class="brand-face">
+      <span>Leash</span>
+    </a>
+    <nav class="topnav" aria-label="Primary">
+      <a href="#what">What it does</a>
+      <a href="#how">How it works</a>
+      <a href="#install">Install</a>
       <a href="https://github.com/zalogarcia/claude-telegram-bridge">GitHub</a>
-      <button class="theme-btn" id="theme-btn" type="button" aria-label="Switch between light and dark">◐</button>
     </nav>
   </div>
 </header>
 
-<section class="hero">
-  <div class="wrap hero-grid">
-    <div>
-      <div class="badges">
-        <span class="badge">MIT</span>
-        <span class="badge">Node 18+</span>
-        <span class="badge">macOS · Linux</span>
-        <span class="badge">No tunnel</span>
-      </div>
-      <h1>Claude Code,<br />from your <span>phone</span>.</h1>
-      <p class="lede">
-        Leash is an always-on link between Telegram and the Claude Code running on your
-        own machine. It reads your repos, uses your config, keeps your sessions — and
-        answers you while you're out.
-      </p>
-      <p>
-        Nothing inbound ever reaches your computer. No tunnel, no webhook, no open
-        port, no third-party relay: your machine calls Telegram, never the reverse.
-      </p>
+<main id="main">
 
-      <div class="cmd">
-        <div class="cmd-head">Install</div>
-        <div class="cmd-body">
-<code id="cmd-text"><span class="ln"><span class="p">$</span> git clone https://github.com/zalogarcia/claude-telegram-bridge.git</span><span class="ln"><span class="p">$</span> cd claude-telegram-bridge &amp;&amp; ./install.sh</span></code>
-          <button class="copy" data-copy="#cmd-text" type="button">Copy</button>
-        </div>
-      </div>
+<!-- ══ HERO ══════════════════════════════════════════════════════════ -->
+<section class="hero" id="top">
+  <div class="wrap hero-in">
+    <div class="hero-art">
+      <div class="glow" aria-hidden="true"></div>
+      <img src="assets/mascot-sit.webp" alt="A round orange bulldog with glowing cyan eyes, a spiked collar and a dog tag shaped like a terminal window" width="720" height="715" class="mascot mascot-hero" fetchpriority="high" decoding="async">
     </div>
 
-    <div class="thread" id="thread">
-      <div class="thread-bar">
-        <span class="avatar">M</span>
-        <b>your bot</b>
-        <small>online</small>
+    <div class="hero-copy">
+      <h1 class="wordmark">Leash</h1>
+      <p class="tagline">STAY. FETCH. OFF-LEASH.</p>
+      <p class="lede">Claude Code and Codex on Telegram. Always on, parallel, steerable, never rate-limited.</p>
+
+      <div class="cta">
+        <a class="btn btn-primary" href="#install">Install</a>
+        <a class="btn btn-ghost" href="https://github.com/zalogarcia/claude-telegram-bridge">GitHub</a>
       </div>
-      <div class="msgs" id="msgs">
-        <div class="msg me reveal" style="animation-delay:.15s">what's failing in the checkout tests?</div>
-        <div class="msg bot work reveal" style="animation-delay:.5s">
-          <span class="hdr">🤖 Working · <span id="secs">8</span>s · <span id="steps">2</span> steps</span>
-          <span class="tool">💻 Bash <span style="color:var(--faint)">npm test -- checkout</span></span>
-          <span class="tool">📖 Read <span style="color:var(--faint)">src/checkout/validate.ts</span></span>
-          <span class="tool" id="t3" style="opacity:0">✏️ Edit <span style="color:var(--faint)">src/checkout/validate.ts</span></span>
-        </div>
-        <div class="msg bot reveal" style="animation-delay:2.6s">
-          Two tests fail on the same cause: <b>validateCart()</b> returns early when
-          <b>items</b> is empty, so the discount branch never runs. Fixed it and re-ran —
-          all 14 pass.
-        </div>
-        <div class="msg me reveal" style="animation-delay:3.4s">nice. run the full suite in the background</div>
-        <div class="msg bot reveal" style="animation-delay:4.1s">
-          🌙 Started the full suite in the background lane — keep talking, I'll report
-          when it lands.
-        </div>
+
+      <div class="chip" data-copy>
+        <span class="chip-mark" aria-hidden="true">&gt;_</span>
+        <code>git clone https://github.com/zalogarcia/claude-telegram-bridge.git ~/claude-telegram-bridge</code>
+        <button class="chip-btn" type="button" data-copy-btn aria-live="polite">Copy</button>
       </div>
+
+      <p class="fineprint">MIT licensed. Runs on your own Mac or Linux box. Node 18 or newer, plus Claude Code.</p>
     </div>
   </div>
 </section>
 
-<section id="how">
+<!-- ══ CHAT DEMO ═════════════════════════════════════════════════════ -->
+<section class="band" id="demo">
   <div class="wrap">
-    <p class="eyebrow">How it works</p>
-    <h2>A daemon on your machine, holding one end of the line.</h2>
-    <p>
-      About 2,000 lines of Node long-poll the Telegram Bot API and pipe whatever you
-      send into <span class="inline">claude -p</span>. Your service manager keeps it
-      alive; a watchdog catches the rare wedge and tells you it did.
-    </p>
-
-    <div class="arch">
-      <div class="node"><b>Telegram app</b> <span>your phone — text, voice notes, photos, files</span></div>
-      <div class="link">message</div>
-      <div class="node"><b>Telegram Bot API</b> <span>the only thing either side talks to</span></div>
-      <div class="link up">long poll · outbound HTTPS from your machine</div>
-      <div class="node"><b>bridge.mjs</b> <span>your machine · launchd or systemd · watchdog</span></div>
-      <div class="indent">
-        <div class="link">routes by length</div>
-        <div class="node lane-a"><b>🤖 chat lane</b> <span>claude -p --resume · always answerable</span></div>
-        <div class="node lane-b" style="margin-top:.6rem"><b>🌙 background workers</b> <span>long jobs, scheduled tasks · one session each, spawned on demand</span></div>
-        <div class="link" style="margin-top:.6rem">on completion, the report goes to the chat lane —<br />which summarizes it for you in plain words</div>
-      </div>
+    <div class="demo-grid">
+    <div class="demo-copy">
+    <p class="eyebrow"><span class="tag">01</span> FETCH</p>
+    <h2 class="h2">You type. <span class="hl">Your machine</span> answers.</h2>
+    <p class="sub">Away from your desk. The deploy is half finished, or you just thought of something. You open Telegram and type it. Claude Code runs it on your machine, in your repos, with your config and your sessions.</p>
+    <p class="caption caption-top">The progress block is one Telegram message, edited as the run goes. Subagent activity streams in too, indented.</p>
     </div>
 
-    <div class="feats" style="margin-top:3rem">
-      <div class="feat">
-        <div><span class="tag">the hard part</span><h3>Unlimited background workers</h3></div>
-        <p>
-          A headless Claude run occupies its process until it finishes — so a
-          twenty-minute job would normally mean twenty minutes of silence. Long
-          commands, scheduled tasks, and anything the assistant judges slow run in
-          their <em>own</em> Claude session instead. If a worker is busy, another
-          spawns — they run in parallel, never queued behind each other, and you
-          keep chatting while they work.
-        </p>
-      </div>
-      <div class="feat">
-        <div><span class="tag">the nice part</span><h3>Workers report to the assistant</h3></div>
-        <p>
-          When a background job finishes, its output goes to your chat session — not
-          dumped on you. The assistant reads it, finishes anything left undone, and
-          sends a short human update. You get a colleague, not a log stream.
-        </p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section>
-  <div class="wrap">
-    <p class="eyebrow">What you get</p>
-    <h2>Everything the terminal does, minus the terminal.</h2>
-
-    <div class="feats">
-      <div class="feat">
-        <div><span class="tag">memory</span><h3>Sessions that persist</h3></div>
-        <p>Ask something today, follow up tomorrow — same conversation. Survives restarts, reboots and sleep. <span class="inline">/new</span> when you want a clean slate, <span class="inline">/cd</span> to switch projects. Name chats with <span class="inline">/rename</span>, list them with <span class="inline">/chats</span>, jump back with <span class="inline">/resume</span>, or fold a long one into a fresh session with <span class="inline">/compact</span>.</p>
-      </div>
-      <div class="feat">
-        <div><span class="tag">visibility</span><h3>Live progress</h3></div>
-        <p>Tool calls stream into a status bubble as work happens — including subagent activity, indented under the agent that spawned it. You can watch a long job think.</p>
-      </div>
-      <div class="feat">
-        <div><span class="tag">input</span><h3>Voice notes and files</h3></div>
-        <p>Talk instead of typing — voice notes are transcribed with Whisper and run as prompts. Send a screenshot with “why does this look wrong?”, or drop in a PDF, CSV or log. Albums arrive as one request.</p>
-      </div>
-      <div class="feat">
-        <div><span class="tag">time</span><h3>Reminders that do things</h3></div>
-        <p>“Remind me at 8” works. So does “every morning, summarize yesterday's commits and tell me what's unfinished” — that one actually runs, in the background lane, and reports back.</p>
-      </div>
-      <div class="feat">
-        <div><span class="tag">control</span><h3>Your commands, your models</h3></div>
-        <p>Custom slash commands pass straight through. Switch models mid-conversation with <span class="inline">/model</span>, check context and usage with <span class="inline">/context</span>, kill a runaway with <span class="inline">/stop</span>.</p>
-      </div>
-      <div class="feat">
-        <div><span class="tag">uptime</span><h3>Self-healing</h3></div>
-        <p>The service manager restarts crashes. A two-strike watchdog catches the rarer case — a process that's alive but wedged — restarts it, verifies it recovered, and messages you what happened.</p>
-      </div>
-    </div>
-  </div>
-</section>
-
-<section id="install">
-  <div class="wrap">
-    <p class="eyebrow">Install</p>
-    <h2>Three minutes, start to finish.</h2>
-    <p>You need <a href="https://claude.com/claude-code">Claude Code</a>, Node 18 or newer, and a Telegram account. macOS uses launchd; Linux uses systemd.</p>
-
-    <div class="steps">
-      <div class="step">
+    <div class="chat" role="img" aria-label="A Telegram conversation. You ask what is failing in the checkout tests. The bot streams its progress, then replies that two tests fail on the same cause, that it fixed it, and that all 14 now pass.">
+      <div class="chat-head">
+        <img src="assets/face-icon.webp" alt="" width="192" height="192" class="chat-avatar" loading="lazy" decoding="async">
         <div>
-          <h3>Clone and run the installer</h3>
-          <p>It checks your prerequisites first and tells you exactly what's missing. Add <span class="inline">--dry-run</span> to see everything it would do without touching a thing.</p>
+          <strong>Leash</strong>
+          <span class="chat-sub">bot &middot; online</span>
         </div>
       </div>
-      <div class="step">
-        <div>
-          <h3>Make a bot, in Telegram</h3>
-          <p>The installer walks you through <a href="https://t.me/botfather">@BotFather</a> — send <span class="inline">/newbot</span>, paste the token back. Then message your new bot once so it can detect your chat ID automatically.</p>
+
+      <div class="chat-body">
+        <div class="bub bub-out">what&rsquo;s failing in the checkout tests?</div>
+
+        <div class="bub bub-in bub-progress">
+          <div class="prog-head">&#129302; Thinking&hellip; &middot; 34s &middot; 6 steps</div>
+          <div class="prog-step">&#128187; <span class="k">Bash</span> npm test -- checkout</div>
+          <div class="prog-step">&#128214; <span class="k">Read</span> src/checkout/validate.ts</div>
+          <div class="prog-step">&#9999;&#65039; <span class="k">Edit</span> src/checkout/validate.ts<span class="caret" aria-hidden="true"></span></div>
         </div>
-      </div>
-      <div class="step">
-        <div>
-          <h3>Send it <span class="inline">/help</span></h3>
-          <p>The service is already installed and running, and it starts again on every login. If you want the assistant to manage reminders and hand off long jobs on its own, paste the snippet from <span class="inline">templates/CLAUDE.md.example</span> into your CLAUDE.md.</p>
-        </div>
+
+        <div class="bub bub-in">Two tests fail on the same cause: <code>validateCart()</code> returns early when items is empty, so the discount branch never runs. Fixed and re-ran, all 14 pass now.</div>
       </div>
     </div>
 
-    <p class="eyebrow" style="margin-top:3.5rem">Commands</p>
-    <div class="scroll">
-      <table>
-        <thead><tr><th>Send this</th><th>And it does</th></tr></thead>
-        <tbody>
-          <tr><td>any text</td><td>Runs in the chat lane — steered into the running task if one is going, or a background worker if it looks long</td></tr>
-          <tr><td>/goal, /autopilot…</td><td>Any other slash command passes straight through to Claude Code</td></tr>
-          <tr><td>photo · file · voice</td><td>Saved locally and handed to Claude; your caption is the instruction</td></tr>
-          <tr><td>/new · /cd</td><td>Fresh chat (the old one stays resumable) · switch working directory</td></tr>
-          <tr><td>/chats · /rename · /resume</td><td>List saved chats · name this one · switch back to any of them</td></tr>
-          <tr><td>/compact</td><td>Summarize this chat and start fresh with the summary carried over</td></tr>
-          <tr><td>/model · /context</td><td>Show or set the model · context size and token usage</td></tr>
-          <tr><td>/status · /logs</td><td>Live state of the chat lane and every worker · tail the daemon log</td></tr>
-          <tr><td>/stop · /restart</td><td>Kill the running task · restart the daemon remotely</td></tr>
-          <tr><td>/remind · /schedules</td><td>Daily, one-off or relative reminders — and scheduled tasks that run</td></tr>
-        </tbody>
-      </table>
     </div>
   </div>
 </section>
 
-<section id="security">
+<!-- ══ WHAT IT DOES ══════════════════════════════════════════════════ -->
+<section class="band" id="what">
   <div class="wrap">
-    <p class="eyebrow">Security</p>
-    <h2>Read this part properly.</h2>
+    <p class="eyebrow"><span class="tag">02</span> THE KIT</p>
+    <h2 class="h2">Eight things a chat window <span class="hl">cannot</span> do.</h2>
 
-    <div class="warn">
-      <p><strong>This gives a Telegram chat the ability to run code on your machine.</strong>
-      That's the whole point of it, and it's worth understanding before you install.</p>
-    </div>
-
-    <ul class="sec-list">
-      <li><b>Single-owner by construction.</b> Every incoming message is checked against your chat ID before anything else happens — no reply, no download, no execution for anyone else. Strangers who find your bot get silence.</li>
-      <li><b>Your Telegram account is the key.</b> Anyone with access to your logged-in Telegram can run commands on your machine. Turn on two-step verification and review your active devices.</li>
-      <li><b>Permission mode is a real choice.</b> The default skips permission prompts, because headless runs can't answer them — without that, commands outside your allowlist are silently denied and tasks half-fail. <span class="inline">/yolo off</span> trades autonomy for friction.</li>
-      <li><b>The token stays local.</b> It lives in <span class="inline">config.json</span> (chmod 600, gitignored) and never leaves your machine. It can't make your computer execute anything on its own — Leash only acts on messages from your chat.</li>
-      <li><b>Untrusted output is fenced.</b> Background worker results arrive inside explicit markers with instructions-inside-are-void framing, because a job that read a web page carries text you didn't write. Defense in depth, not a sandbox — the usual caveats for autonomous agents still apply.</li>
-      <li><b>Nothing else leaves.</b> No telemetry, no relay, no cloud component. Only the Telegram messages themselves — plus voice-note audio, if you turn on transcription.</li>
+    <ul class="grid" role="list">
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v8"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>
+        <h3>Always on, no open port</h3>
+        <p>A service under launchd or systemd long polls the Telegram Bot API. Outbound HTTPS only. No tunnel, no webhook, no inbound port, no relay.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="7" height="16" rx="2"/><rect x="14" y="4" width="7" height="10" rx="2"/></svg>
+        <h3>Parallel background workers</h3>
+        <p>Long jobs run in their own Claude session. If a worker is busy another spawns, so jobs run beside each other instead of queueing behind each other.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17h7a5 5 0 0 0 5-5V7"/><path d="m12 11 4-4 4 4"/></svg>
+        <h3>Steer a job mid run</h3>
+        <p>Message while a task is running and it goes into the running task, the same as typing mid turn in the CLI. Change the instruction without killing the work.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        <h3>Reminders and scheduled tasks</h3>
+        <p>Remind me at 8, or every morning summarize yesterday&rsquo;s commits. The second one actually runs, as a real Claude task, and reports back.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h13"/><path d="m13.5 4.5 3.5 3.5-3.5 3.5"/><path d="M20 16H7"/><path d="m10.5 12.5-3.5 3.5 3.5 3.5"/></svg>
+        <h3>A second engine behind it</h3>
+        <p>OpenAI Codex is billed separately, so an Anthropic limit does not touch it. Ask it directly, hand it a whole job, or let it pick up queued work while Claude is walled.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.5 12a8.5 8.5 0 1 1-2.5-6"/><path d="M20.5 3.5v5h-5"/></svg>
+        <h3>Your accounts, rotated</h3>
+        <p>Hold a personal and a work subscription. See each one&rsquo;s live headroom, swap with one tap, and when the active account is rate limited, background work moves to one that is not.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11.5 12 19.5a5 5 0 0 1-7.1-7.1l8.6-8.5a3.4 3.4 0 0 1 4.8 4.8l-8.6 8.5a1.7 1.7 0 0 1-2.4-2.4l7.9-7.8"/></svg>
+        <h3>Screenshots, files, voice notes</h3>
+        <p>Send a screenshot with &ldquo;why does this look broken?&rdquo; Images, PDFs and code up to 20 MB land in <code>inbox/</code> and the caption is the instruction. Voice notes get transcribed and run.</p>
+      </li>
+      <li class="card">
+        <svg class="ico" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="m7 10 2.5 2.5L7 15"/><path d="M13 15h4.5"/></svg>
+        <h3>Your repos, your sessions</h3>
+        <p>Ask today, follow up tomorrow, same conversation. Sessions are per lane and per directory, survive restarts and reboots, and your custom slash commands work.</p>
+      </li>
     </ul>
+
+    <p class="also">Also in the box:
+      <span class="pill">named, resumable chats</span>
+      <span class="pill">live progress</span>
+      <span class="pill">model switching</span>
+      <span class="pill">usage and context</span>
+      <span class="pill">remote restart</span>
+      <span class="pill">log tail</span>
+      <span class="pill">self healing watchdog</span>
+    </p>
   </div>
 </section>
 
-<section class="cta">
+<!-- ══ HOW IT WORKS ══════════════════════════════════════════════════ -->
+<section class="band" id="how">
   <div class="wrap">
-    <h2>Put it in your pocket.</h2>
-    <p style="margin-inline:auto">Free, MIT-licensed, and yours to fork.</p>
-    <div class="cmd">
-      <div class="cmd-head">Install</div>
-      <div class="cmd-body">
-<code id="cmd-text-2"><span class="ln"><span class="p">$</span> git clone https://github.com/zalogarcia/claude-telegram-bridge.git</span><span class="ln"><span class="p">$</span> cd claude-telegram-bridge &amp;&amp; ./install.sh</span></code>
-        <button class="copy" data-copy="#cmd-text-2" type="button">Copy</button>
+    <p class="eyebrow"><span class="tag">03</span> STAY</p>
+    <h2 class="h2">Three parts. <span class="hl">One of them is yours</span>.</h2>
+    <p class="sub">Around two thousand lines of Node that long poll the Telegram Bot API and pipe messages into <code>claude -p</code>. The only network traffic is your machine calling Telegram.</p>
+
+    <ol class="flow" role="list">
+      <li class="node">
+        <span class="node-n">1</span>
+        <h3>Your phone</h3>
+        <p>You type a message, send a screenshot, or hold the mic. Normal Telegram, nothing installed.</p>
+      </li>
+      <li class="node">
+        <span class="node-n">2</span>
+        <h3>Telegram Bot API</h3>
+        <p>Your machine long polls it over outbound HTTPS. Telegram never calls in. Every update is checked against your chat ID before anything else happens, so strangers who find your bot get silence.</p>
+      </li>
+      <li class="node">
+        <span class="node-n">3</span>
+        <h3>Leash, on your machine</h3>
+        <p>It runs Claude Code and Codex locally, in your repos. Two lanes: a chat lane that is always answerable, and a worker pool that takes the long jobs.</p>
+      </li>
+    </ol>
+
+    <div class="lanes">
+      <div class="lane">
+        <p class="lane-k">chat lane</p>
+        <p>One task at a time. Messages sent mid task steer into it, so it is always reachable.</p>
+      </div>
+      <div class="lane">
+        <p class="lane-k">worker pool</p>
+        <p>bg1, bg2, bg3 and on. Unbounded and parallel. Each worker is a fresh, self contained session, discarded when it drains.</p>
+      </div>
+      <div class="lane lane-wide">
+        <p class="lane-k">the handback</p>
+        <p>A finished job reports to the chat session, not to you, framed as untrusted worker data. The assistant decides whether more work is needed, then sends you a short human update. You get a colleague, not a log stream.</p>
       </div>
     </div>
-    <a class="btn" href="https://github.com/zalogarcia/claude-telegram-bridge">View the source on GitHub →</a>
+
+    <div class="claimset">
+      <p class="claim"><span aria-hidden="true">&#10003;</span> No tunnel. No webhook. No cloud relay.</p>
+      <p class="claim"><span aria-hidden="true">&#10003;</span> Chat IDs come from Telegram&rsquo;s servers and cannot be spoofed by a sender.</p>
+      <p class="claim"><span aria-hidden="true">&#10003;</span> The bot token lives only in <code>config.json</code>, chmod 600 and gitignored.</p>
+      <p class="claim"><span aria-hidden="true">&#10003;</span> Nothing leaves your machine except the Telegram messages themselves, voice note audio if you turn on transcription, and calls to Anthropic&rsquo;s own OAuth endpoints if you enroll more than one account.</p>
+      <p class="claim claim-warn"><span aria-hidden="true">&#9888;</span> The default permission mode is skip permissions, because a headless run cannot answer a prompt. <code>/yolo off</code> switches to accept edits. Know which one you are running.</p>
+    </div>
+
+    <p class="caption">It also gives a Telegram chat the ability to run code on your machine. Anyone with access to your logged in Telegram can run commands. Turn on two step verification and read the <a href="https://github.com/zalogarcia/claude-telegram-bridge#security">security section</a> before you install.</p>
   </div>
 </section>
 
-<footer>
+<!-- ══ OFF LEASH ═════════════════════════════════════════════════════ -->
+<section class="band band-split" id="offleash">
+  <div class="wrap split">
+    <div class="split-art">
+      <div class="glow glow-sm" aria-hidden="true"></div>
+      <img src="assets/mascot-offleash.webp" alt="The bulldog mid leap with all four legs off the ground and a loose leash trailing behind it" width="640" height="612" class="mascot" loading="lazy" decoding="async">
+    </div>
+    <div class="split-copy">
+      <p class="eyebrow"><span class="tag">04</span> OFF-LEASH</p>
+      <h2 class="h2">Hand it the long job. <span class="hl">Keep talking.</span></h2>
+      <p>A headless run occupies its process until it finishes, so a twenty minute job would normally mean twenty minutes of silence. Long commands, anything you prefix <code>bg:</code>, scheduled tasks and handoffs from a session go to their own worker instead.</p>
+      <p>The pool is unbounded. A job that arrives while the pool is busy spawns its own worker rather than waiting. Workers are detached, in their own process group, writing to a file rather than a pipe, so restarting the daemon does not kill them. On the next boot it re-attaches to the ones still running and tells you about the ones that died.</p>
+      <div class="mini">
+        <code>node bg.mjs --file ./brief.md</code>
+        <p>Pass a real brief as a file, never as a shell argument: backticks inside it would turn into command substitution and the worker would get a brief with those terms silently blanked out.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ STEERING ══════════════════════════════════════════════════════ -->
+<section class="band band-split" id="steering">
+  <div class="wrap split split-rev">
+    <div class="split-art">
+      <div class="glow glow-sm" aria-hidden="true"></div>
+      <img src="assets/mascot-tug.webp" alt="The bulldog gripping the handle of an orange leash in its teeth and leaning back to tug it" width="560" height="545" class="mascot" loading="lazy" decoding="async">
+    </div>
+    <div class="split-copy">
+      <p class="eyebrow"><span class="tag">05</span> THE TUG</p>
+      <h2 class="h2">Wrong turn? <span class="hl">Pull, do not shoot.</span></h2>
+      <p>A running job used to be unreachable. The only way to change its instructions was to kill it and re-dispatch, which throws away all the context it had already built.</p>
+      <p>Now a message sent mid task is steered into the running run over the CLI&rsquo;s streaming input mode. It either folds your note into the current turn or answers it right after. Only when steering is impossible, because nothing is running yet or the run is already finishing, does the message queue instead.</p>
+      <div class="mini">
+        <code>/steer latest skip the browser step, the harness is down</code>
+        <p>Steer when the brief is still valid and you are adding or correcting an instruction. Kill and re-dispatch only when the brief itself was wrong.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ INSTALL ═══════════════════════════════════════════════════════ -->
+<section class="band" id="install">
+  <div class="wrap">
+    <p class="eyebrow"><span class="tag">06</span> SETUP</p>
+    <h2 class="h2">Three commands, <span class="hl">then talk to it</span>.</h2>
+    <p class="sub">Requirements: Claude Code, Node 18 or newer, macOS with launchd or Linux with systemd, and a Telegram account.</p>
+
+    <ol class="steps" role="list">
+      <li class="step">
+        <div class="step-h"><span class="step-n">1</span><h3>Clone it</h3></div>
+        <div class="pre" data-copy>
+          <button class="chip-btn pre-btn" type="button" data-copy-btn aria-live="polite">Copy</button>
+<pre><code>git clone https://github.com/zalogarcia/claude-telegram-bridge.git ~/claude-telegram-bridge
+cd ~/claude-telegram-bridge</code></pre>
+        </div>
+      </li>
+      <li class="step">
+        <div class="step-h"><span class="step-n">2</span><h3>Run the installer</h3></div>
+        <div class="pre" data-copy>
+          <button class="chip-btn pre-btn" type="button" data-copy-btn aria-live="polite">Copy</button>
+<pre><code>./install.sh</code></pre>
+        </div>
+        <p>It checks prerequisites, walks you through creating a bot with BotFather, auto detects your chat ID, writes a <code>config.json</code> at chmod 600, installs the service and starts it.</p>
+        <div class="pre" data-copy>
+          <button class="chip-btn pre-btn" type="button" data-copy-btn aria-live="polite">Copy</button>
+<pre><code>./install.sh --dry-run</code></pre>
+        </div>
+        <p>Preview exactly what it would do without touching anything.</p>
+      </li>
+      <li class="step">
+        <div class="step-h"><span class="step-n">3</span><h3>Message your bot</h3></div>
+        <div class="pre" data-copy>
+          <button class="chip-btn pre-btn" type="button" data-copy-btn aria-live="polite">Copy</button>
+<pre><code>/help</code></pre>
+        </div>
+        <p>That is the whole install. Everything after this is optional.</p>
+      </li>
+    </ol>
+
+    <div class="opts">
+      <div class="opt">
+        <h3>Optional: voice notes</h3>
+        <p>Export an <code>OPENAI_API_KEY</code> in your shell profile, which the bridge reads because service managers do not. Without a key, voice notes are handed to Claude as audio files instead.</p>
+      </div>
+      <div class="opt">
+        <h3>Optional, and recommended</h3>
+        <p>Copy the block in <code>templates/CLAUDE.md.example</code> into your own <code>CLAUDE.md</code>. That is what teaches your sessions to hand long jobs to the background lane and to manage your reminders in plain English.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ FAQ ═══════════════════════════════════════════════════════════ -->
+<section class="band" id="faq">
+  <div class="wrap">
+    <p class="eyebrow"><span class="tag">07</span> QUESTIONS</p>
+    <h2 class="h2">The ones <span class="hl">worth asking</span>.</h2>
+
+    <div class="faq">
+      <details>
+        <summary>Is my code sent anywhere?</summary>
+        <p>Nowhere it would not already go when you run Claude Code in your terminal. The bridge adds no destination of its own: your prompts and its replies travel as Telegram messages, voice note audio goes to transcription if you turn that on, and enrolling a second account adds calls to Anthropic&rsquo;s own OAuth endpoints for the usage numbers. Your repos stay where they are.</p>
+      </details>
+      <details>
+        <summary>Do I need a server, a tunnel or an open port?</summary>
+        <p>None of the three. The bridge long polls the Telegram Bot API over outbound HTTPS, so nothing inbound ever reaches your machine. No webhook, no third party relay. Your machine does need to be awake: messages sent while it sleeps queue at Telegram and are skipped as stale after an hour.</p>
+      </details>
+      <details>
+        <summary>What if a stranger finds my bot?</summary>
+        <p>They get silence. Every incoming update is checked against your chat ID before anything else happens, so there is no reply, no download and no execution for anyone else. Chat IDs come from Telegram&rsquo;s servers and cannot be spoofed by a sender. The real key is your Telegram account itself, so turn on two step verification and keep an eye on your device list.</p>
+      </details>
+      <details>
+        <summary>Does it work on Linux?</summary>
+        <p>Yes, with systemd. It is tested day to day on macOS with Claude Code 2.x. The Linux path is included and structurally sound but less battle tested, so issues and pull requests are welcome.</p>
+      </details>
+      <details>
+        <summary>What does it cost?</summary>
+        <p>The bridge is MIT licensed and free. You pay for what it drives: your own Claude Code subscription, plus OpenAI usage if you turn on voice note transcription or use Codex as the second engine.</p>
+      </details>
+      <details>
+        <summary>I have two Claude subscriptions. What happens when one is rate limited?</summary>
+        <p>Enroll both. You get each account&rsquo;s live headroom, one tap swaps, and when the active account is rate limited the bridge rotates new background work to an enrolled account that still has room. Workers already running are never killed by a swap. When every account is walled, newly queued jobs run on Codex instead of waiting, and the reply says so. This is a switcher between subscriptions you already pay for, not a way around anyone&rsquo;s plan limits.</p>
+      </details>
+      <details>
+        <summary>Why a bulldog?</summary>
+        <p>Because it sits at your feet all day, fetches on command, and looks deeply unimpressed while doing it.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
   <div class="wrap foot-in">
-    <span>MIT licensed</span>
-    <span><a href="https://github.com/zalogarcia/claude-telegram-bridge">github.com/zalogarcia/claude-telegram-bridge</a></span>
-    <span class="sp">Not affiliated with Anthropic or Telegram.</span>
+    <div>
+      <p class="foot-brand">Leash</p>
+      <p class="foot-note">Formerly claude-telegram-bridge.</p>
+    </div>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="https://github.com/zalogarcia/claude-telegram-bridge">GitHub</a>
+      <a href="https://github.com/zalogarcia/claude-telegram-bridge/blob/main/LICENSE">MIT license</a>
+      <a href="https://zalokabche.com">Built by Zalo Kabche</a>
+    </nav>
+  </div>
+  <div class="wrap">
+    <p class="foot-fine">Not affiliated with Anthropic or Telegram. Claude and Claude Code are trademarks of Anthropic.</p>
   </div>
 </footer>
-
-<script>
-// Theme toggle — flips to the opposite of what's currently showing.
-(function () {
-  var btn = document.getElementById("theme-btn");
-  if (!btn) return;
-  btn.addEventListener("click", function () {
-    var root = document.documentElement;
-    var current =
-      root.getAttribute("data-theme") ||
-      (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    var next = current === "dark" ? "light" : "dark";
-    root.setAttribute("data-theme", next);
-    try { localStorage.setItem("ctb-theme", next); } catch (e) {}
-  });
-})();
-
-// Copy buttons
-document.querySelectorAll("button.copy").forEach(function (btn) {
-  btn.addEventListener("click", function () {
-    var el = document.querySelector(btn.dataset.copy);
-    var text = el.innerText.replace(/^\$ /gm, "");
-    function flash(label) {
-      btn.textContent = label;
-      btn.classList.add("done");
-      setTimeout(function () { btn.textContent = "Copy"; btn.classList.remove("done"); }, 1800);
-    }
-    // navigator.clipboard needs a secure context; fall back for everything else.
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(function () { flash("Copied"); }, function () { legacy(); });
-    } else {
-      legacy();
-    }
-    function legacy() {
-      var ta = document.createElement("textarea");
-      ta.value = text;
-      ta.setAttribute("readonly", "");
-      ta.style.cssText = "position:absolute;left:-9999px;top:0";
-      document.body.appendChild(ta);
-      ta.select();
-      var ok = false;
-      try { ok = document.execCommand("copy"); } catch (e) {}
-      document.body.removeChild(ta);
-      flash(ok ? "Copied" : "Press ⌘C");
-    }
-  });
-});
-
-// Hero thread: play the product once, on load.
-var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-var thread = document.getElementById("thread");
-var secs = document.getElementById("secs");
-var steps = document.getElementById("steps");
-var t3 = document.getElementById("t3");
-
-if (reduce) {
-  thread.classList.add("played");
-  t3.style.opacity = 1;
-  secs.textContent = "11";
-  steps.textContent = "3";
-} else {
-  requestAnimationFrame(function () { thread.classList.add("played"); });
-  var s = 8, n = 0;
-  var tick = setInterval(function () {
-    s += 1;
-    secs.textContent = s;
-    if (s === 10) { t3.style.transition = "opacity .4s"; t3.style.opacity = 1; steps.textContent = "3"; }
-    if (++n >= 3) clearInterval(tick);
-  }, 420);
-}
-</script>
 
 </body>
 </html>
