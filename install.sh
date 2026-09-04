@@ -57,6 +57,16 @@ ok "claude at $CLAUDE_BIN"
 command -v curl >/dev/null 2>&1 || die "curl not found."
 command -v jq   >/dev/null 2>&1 || warn "jq not found — the watchdog can't send Telegram alerts without it (brew install jq)."
 
+# Codex is OPTIONAL and this check only ever warns. It is the second engine:
+# with it, /codex answers on OpenAI's billing and background work keeps moving
+# while every Claude account is rate limited. Without it, every Codex path says
+# so in one line and nothing else changes.
+if command -v codex >/dev/null 2>&1; then
+  ok "codex at $(command -v codex) — the second engine is available (/codex, and the fallback while Claude is limited)"
+else
+  warn "codex not found — optional. Install the OpenAI Codex CLI and run 'codex login' to enable /codex and the rate-limit fallback. Everything else works without it."
+fi
+
 OS="$(uname)"
 case "$OS" in
   Darwin) ok "macOS — will install a LaunchAgent" ;;

@@ -15,6 +15,10 @@
   "bgTimeoutMs": 28800000,
   "staleSec": 3600,
 
+  "codexBin": "codex",
+  "codexTimeoutMs": 1800000,
+  "codexModel": "",
+
   "bgTailMs": 300,
   "reattachPollMs": 5000,
   "runLogMaxAgeDays": 7,
@@ -31,6 +35,9 @@
     "timeoutMs": "Kill a CHAT-lane task after this long. Default 30 minutes — you're waiting on the reply.",
     "bgTimeoutMs": "Kill a BACKGROUND worker after this long. Default 8 hours — that lane is for hour-scale jobs.",
     "staleSec": "Ignore messages older than this (e.g. queued while the machine slept). Default 1 hour.",
+    "codexBin": "The OpenAI Codex CLI, for the second engine (/codex and the rate-limit fallback). Optional: with no binary installed every Codex path says so and nothing else changes.",
+    "codexTimeoutMs": "Kill a Codex run after this long. Default 30 minutes. 0 disarms the deadline. A Codex run is billed per token and cannot be steered, so an unbounded one is worse than a killed one.",
+    "codexModel": "Empty = whatever the codex CLI itself defaults to.",
     "bgTailMs": "How often the daemon polls a detached worker's log file, in ms. This replaces the stdout pipe. Default 300.",
     "reattachPollMs": "How often to check whether a worker that outlived a daemon restart has exited, in ms. Default 5000.",
     "runLogMaxAgeDays": "Delete background run logs older than this at startup. Logs still named by a live worker are kept. Default 7.",

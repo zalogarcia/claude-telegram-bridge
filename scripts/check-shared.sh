@@ -59,6 +59,21 @@ SHARED_MODULES=(
   credential-store.test.mjs
 )
 
+# NOT LISTED, and why. These four modules were ported from the private sibling
+# and are functionally identical, but they carry the owner's name in their
+# comments there and cannot say it here, so byte-identity is unreachable until
+# the private copies are genericized:
+#
+#   bg-steer.mjs        + its test   (the steer framing names the assistant)
+#   bg-codex.mjs        + its test   (comments; a hardcoded default timezone)
+#   codex-account.mjs   + its test   (comments)
+#   bg-codex-wiring.test.mjs         (harness stubs differ: no full-report file here)
+#
+# Once the private side drops those references, both lists can take them and the
+# divergence stops being a matter of trust. bg-lane-rules.mjs and bg.mjs are
+# public-only shapes and are not candidates: bg.mjs carries this repo's config
+# layer, and the private repo has no bg-lane-rules.mjs at all.
+
 if [ ! -d "$SIBLING" ]; then
   echo "check-shared: sibling repo not found at $SIBLING" >&2
   echo "  set BRIDGE_SIBLING_REPO=/path/to/the/other/repo" >&2

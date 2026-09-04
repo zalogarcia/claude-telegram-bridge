@@ -8,6 +8,7 @@ schedules.json
 bg-queue.json
 bg-results.jsonl
 bg-inflight.json
+steer.sock
 runs/
 heartbeat
 .bridge-paused

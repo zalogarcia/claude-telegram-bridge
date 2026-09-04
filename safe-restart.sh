@@ -12,15 +12,54 @@
 # The invoking run is itself a child of the daemon, so the script naturally
 # waits for the current reply to land before restarting.
 #
-# Usage: safe-restart.sh [timeout-minutes]   (default 15; on timeout it
-# restarts anyway — same behavior as a fixed delay, but only as a last
-# resort, and it logs that it did.)
+# Usage: safe-restart.sh [--allow-bg] [timeout-minutes]   (default 15; on
+# timeout it restarts anyway — same behavior as a fixed delay, but only as a
+# last resort, and it logs that it did.)
+#
+# --allow-bg: restart as soon as the CHAT lane is idle, without waiting for
+# background workers. Background workers are detached and survive a restart
+# (see README, "Background workers outlive the daemon"), so waiting hours for a
+# long job to end is a cost with no matching risk.
+#
+# What the flag DOES cost: a worker in flight loses its steerability. The daemon
+# holds its stdin, so when the daemon goes the worker reads EOF, finishes, and is
+# re-attached on the next boot exactly as before, but `bg.mjs steer` can no
+# longer reach it and `bg.mjs ps` will show it as `steerable: no`. Without the
+# flag, behaviour is unchanged: the restart waits for every child.
 
-TIMEOUT_MIN=${1:-15}
+ALLOW_BG=0
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --allow-bg) ALLOW_BG=1 ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+TIMEOUT_MIN=${ARGS[0]:-15}
 LABEL="${BRIDGE_SERVICE_LABEL:-com.claude-telegram-bridge}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INFLIGHT="${BRIDGE_INFLIGHT_FILE:-$SCRIPT_DIR/bg-inflight.json}"
 deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+
+# Are ALL of the daemon's live children registered background workers?
+# (Codex runs count too: they are written to the same registry with
+# engine: "codex", and this only ever asks whether a pid is registered.)
+# The registry is authoritative for the same reason it is below: the chat lane's
+# command line is identical to a worker's, so `ps` pattern matching cannot tell
+# them apart. Prints 1 only when there is at least one child and every one of
+# them is a registered bg pid; 0 otherwise, including on any error.
+only_bg_children() {
+  python3 - "$INFLIGHT" $1 <<'PY' 2>/dev/null || echo 0
+import json, sys
+try:
+    recs = json.load(open(sys.argv[1]))
+except Exception:
+    print(0); raise SystemExit
+bg = {r.get("pid") for r in (recs or {}).values() if r.get("pid")}
+kids = [int(a) for a in sys.argv[2:] if a.isdigit()]
+print(1 if kids and all(k in bg for k in kids) else 0)
+PY
+}
 
 while :; do
   # ps, not pgrep, for BOTH probes: pgrep -f can miss node scripts on macOS,
@@ -30,6 +69,15 @@ while :; do
   [ -z "$DPID" ] && break                     # daemon down — restart boots it
   kids=$(ps -axo ppid= | awk -v p="$DPID" '$1 == p' | wc -l | tr -d ' ')
   [ "$kids" = "0" ] && break                  # idle — safe to restart
+  if [ "$ALLOW_BG" = "1" ]; then
+    # Every live child is a detached background worker: the chat lane is idle,
+    # and the workers outlive us. Restart now rather than in four hours.
+    child_pids=$(ps -axo ppid=,pid= | awk -v p="$DPID" '$1 == p {print $2}')
+    if [ "$(only_bg_children "$child_pids")" = "1" ]; then
+      echo "[safe-restart] --allow-bg: chat lane idle, $kids detached worker(s) running, restarting over them (they survive; they lose steerability)" >&2
+      break
+    fi
+  fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
     # TIMEOUT. The old behaviour was "restart anyway", which on 2026-08-02 killed
     # a live 5-piece video job mid-composite: four outputs left unverified, one a
