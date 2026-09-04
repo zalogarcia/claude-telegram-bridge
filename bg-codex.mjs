@@ -451,6 +451,21 @@ export function codexFallbackPrefix(pausedUntil, opts = {}) {
   return until ? `[Codex fallback, Claude limited until ${until}]` : '[Codex fallback, Claude is rate limited]';
 }
 
+// How much of one parked pair survives into the note. A wall lasts hours and
+// parks up to ten of them, and either half can be huge: a `--file` handoff is a
+// whole brief, and a Codex answer is a whole report. Unclipped, the note is a
+// prompt several hundred kilobytes long written into the chat lane's stdin the
+// moment the wall lifts. This is CONTEXT so the conversation makes sense, not
+// the delivery: both halves already reached the owner in full at the time, and
+// the full text is in bg-results.jsonl.
+export const PARKED_PROMPT_MAX = 400;
+export const PARKED_ANSWER_MAX = 1200;
+
+const clipTo = (s, max) => {
+  const t = String(s ?? '').trim();
+  return t.length > max ? `${t.slice(0, max)}… (clipped, the full text is in bg-results.jsonl)` : t;
+};
+
 /**
  * What the assistant is handed once Claude can run again, for the messages
  * Codex answered in its place. Framed so it does NOT re-answer them: the owner
@@ -458,8 +473,10 @@ export function codexFallbackPrefix(pausedUntil, opts = {}) {
  */
 export function codexParkedNote({ ownerName = 'the owner', items = [] } = {}) {
   const list = items.map((it, i) => {
-    const lines = [`${i + 1}. ${ownerName} asked: ${String(it.prompt || '').trim()}`];
-    lines.push(`   Codex answered: ${String(it.answer || '(the Codex run failed)').trim()}`);
+    // "sent" rather than "asked": a parked pair can be a background brief handed
+    // over from a terminal, which nobody asked as a question.
+    const lines = [`${i + 1}. ${ownerName} sent: ${clipTo(it.prompt, PARKED_PROMPT_MAX)}`];
+    lines.push(`   Codex answered: ${it.answer ? clipTo(it.answer, PARKED_ANSWER_MAX) : '(the Codex run failed)'}`);
     return lines.join('\n');
   });
   return [

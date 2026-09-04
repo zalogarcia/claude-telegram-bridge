@@ -22,7 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TASK_ANCHOR, briefTitle, stripLaneRules } from './bg-lane-rules.mjs';
+import { TASK_ANCHOR, briefRepo, briefTitle, stripLaneRules } from './bg-lane-rules.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const TMP = mkdtempSync(path.join(tmpdir(), 'bg-lane-rules-'));
@@ -215,6 +215,78 @@ t('briefTitle clips long titles with an ellipsis', () => {
 
 t('briefTitle says something rather than nothing for an empty brief', () => {
   eq(briefTitle(''), '(no description)');
+});
+
+// ---------------------------------------------------------------------------
+// briefRepo: which repo a brief is ABOUT.
+//
+// This is not cosmetic. It picks the ONE directory a Codex job may write to
+// (`--sandbox workspace-write` is rooted at a single path), so a wrong answer
+// either strands the job outside the repo it was given or lets it edit
+// same-named files in a different tree.
+// ---------------------------------------------------------------------------
+const WS = { workspaceDir: '/Users/someone/dev', fallbackDir: '/Users/someone/dev/current-chat' };
+
+t('an explicit Repo: line wins over everything else', () => {
+  eq(briefRepo('# TASK: fix the thing\nRepo: `web-app`\n\nsome prose about /Users/someone/dev/other', WS), 'web-app');
+  eq(briefRepo('**Repository**: api-server', WS), 'api-server');
+  eq(briefRepo('- repo: billing\n', WS), 'billing');
+});
+
+t('a workspace path in the opening block names the repo', () => {
+  eq(briefRepo('# TASK\n\nThe repo is at ~/dev/media-tools and the bug is in src/.', WS), 'media-tools');
+  eq(briefRepo('Work in /Users/someone/dev/media-tools/src', WS), 'media-tools');
+});
+
+t('★ the workspace root itself is not a repo name', () => {
+  // "~/dev" names the workspace, not a checkout inside it. Returning "dev" here
+  // would root a workspace-write run at the parent of every repo on the machine.
+  eq(briefRepo('# TASK\n\nTidy up ~/dev and report', { workspaceDir: '/Users/someone/dev', fallbackDir: '/Users/someone/dev' }), null);
+});
+
+t('★ the workspace root is read from the injected path, not hardcoded', () => {
+  // The private sibling hardcoded `/dev/`. A public repo cannot assume where
+  // anyone keeps their checkouts; DEFAULT_CWD is configurable.
+  const custom = { workspaceDir: '/srv/code', fallbackDir: null };
+  eq(briefRepo('# TASK\n\nsee ~/code/payments for the failing test', custom), 'payments');
+  eq(briefRepo('# TASK\n\nsee /srv/code/payments for the failing test', custom), 'payments');
+  eq(briefRepo('# TASK\n\nsee ~/dev/payments for the failing test', custom), null);
+});
+
+t('a regex character in the workspace root cannot change what matches', () => {
+  const odd = { workspaceDir: '/Users/someone/c+de', fallbackDir: null };
+  eq(briefRepo('work in ~/c+de/thing', odd), 'thing');
+  eq(briefRepo('work in ~/ccccde/thing', odd), null);
+});
+
+t('with nothing named, the fallback directory basename is used', () => {
+  eq(briefRepo('# TASK\n\njust do the thing', WS), 'current-chat');
+  eq(briefRepo('# TASK\n\njust do the thing', { workspaceDir: '/Users/someone/dev', fallbackDir: null }), null);
+});
+
+t('the repo is read from the STRIPPED brief, past the LANE RULES preamble', () => {
+  // The preamble mentions no repo, but it is a kilobyte of text: a lookahead
+  // applied to the raw brief would never reach the first real line.
+  const withRules = `LANE RULES (you are a background worker)\n1. NEVER use run_in_background.\n\n${TASK_ANCHOR}\n# TASK: ship it\nRepo: web-app\n`;
+  eq(briefRepo(withRules, WS), 'web-app');
+});
+
+t('a repo named far down the brief does not outrank the job', () => {
+  const late = `# TASK: ship it\n${'\nfiller'.repeat(30)}\nRepo: wrong-one\n`;
+  eq(briefRepo(late, WS), 'current-chat'); // the fallback, not the page-two mention
+});
+
+t('★ a traversal collapses to a bare name, so it can only ever point inside the workspace', () => {
+  // Only the last path segment survives, so `Repo: ../../etc` asks for
+  // `<workspace>/etc` (which will not exist) rather than escaping upward.
+  eq(briefRepo('Repo: ../../etc', WS), 'etc');
+  eq(briefRepo('Repo: /etc/passwd', WS), 'passwd');
+});
+
+t('junk is refused rather than guessed at', () => {
+  eq(briefRepo('Repo: ' + 'x'.repeat(80), WS), 'current-chat'); // too long to be a repo name
+  eq(briefRepo('Repo: has spaces in it', WS), 'has'); // a declaration is one token, and only the first counts
+  eq(briefRepo(null, { workspaceDir: '/Users/someone/dev', fallbackDir: null }), null);
 });
 
 rmSync(TMP, { recursive: true, force: true });

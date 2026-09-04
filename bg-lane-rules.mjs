@@ -60,3 +60,58 @@ export function briefTitle(text, max = 70) {
   if (!one) return '(no description)';
   return one.length <= max ? one : `${one.slice(0, Math.max(0, max - 1))}…`;
 }
+
+// How far into a brief to look for its repo. Far enough to clear a title, a
+// blank line and an opening paragraph; not so far that a repo mentioned in
+// passing on page two outranks the one the job is about.
+export const REPO_LOOKAHEAD_LINES = 12;
+
+/**
+ * Which repo a brief is ABOUT, by name, or null.
+ *
+ * This decides where a Codex job is allowed to write: `--sandbox workspace-write`
+ * is rooted at one directory, so a brief about repo X handed over while the chat
+ * is pointed at repo Y must run in X or it cannot do the job at all (and may
+ * edit same-named files in the wrong tree).
+ *
+ * Order: an explicit "Repo:" line wins, then a workspace path in the opening
+ * block, then the basename of the fallback directory. Returns null rather than
+ * a guess, and the caller decides what a null means.
+ *
+ * `workspaceDir` is the root the daemon keeps checkouts under, injected rather
+ * than assumed: this module owns no paths. Its basename is also the one name a
+ * path match must NOT return, because "~/work" names the workspace, not a repo
+ * inside it.
+ */
+export function briefRepo(text, { workspaceDir = null, fallbackDir = null } = {}) {
+  const head = stripLaneRules(text).split('\n').slice(0, REPO_LOOKAHEAD_LINES).join('\n');
+  const root = String(workspaceDir || '').split('/').filter(Boolean).pop() || null;
+  const clean = (v) => {
+    const base = String(v || '')
+      .replace(/[`'"*]/g, '')
+      .replace(/[.,;:)\]]+$/, '')
+      .split('/')
+      .filter(Boolean)
+      .pop();
+    if (!base || !/^[\w.-]{1,60}$/.test(base)) return null;
+    return base === root ? null : base; // the workspace root names no repo
+  };
+  const declared = head.match(/^[\s>*-]*(?:\*\*)?repo(?:sitory)?(?:\*\*)?\s*:\s*(\S+)/im);
+  if (declared) {
+    const named = clean(declared[1]);
+    if (named) return named;
+  }
+  // A path UNDER the workspace root, written either absolutely or with ~. Built
+  // from workspaceDir so a machine that keeps its checkouts somewhere other than
+  // ~/dev is matched too, and escaped so a root with a regex character in it
+  // cannot change what this matches.
+  if (root) {
+    const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const inPath = head.match(new RegExp(`(?:~|/[\\w./-]*?)/${esc}/([\\w.-]+)`));
+    if (inPath) {
+      const named = clean(inPath[1]);
+      if (named) return named;
+    }
+  }
+  return fallbackDir ? clean(fallbackDir) : null;
+}

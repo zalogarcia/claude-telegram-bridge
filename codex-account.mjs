@@ -286,9 +286,10 @@ export async function fetchCodexRateLimits({ spawnImpl, bin = 'codex', timeoutMs
       resolve(out);
     };
     // NOT unref'd. This timer is the only thing that kills a hung app-server, it
-    // is cleared on every settle, and it is bounded at 8s, so the worst it can
-    // do is hold the process open for those 8s, which is exactly the interval in
-    // which there is a child that still needs killing.
+    // is cleared on every settle, and it is bounded by `timeoutMs`
+    // (CODEX_RATE_LIMIT_TIMEOUT_MS, 5s), so the worst it can do is hold the
+    // process open for that long, which is exactly the interval in which there
+    // is a child that still needs killing.
     const timer = setTimeout(() => stop({ ok: false, error: 'codex app-server timed out' }), timeoutMs);
     const write = (msg) => {
       try {

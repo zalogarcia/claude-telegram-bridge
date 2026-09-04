@@ -64,9 +64,23 @@ the binary every path below answers with one line saying so, and nothing else ch
 - Every run, background included, now gives its stdin pipe back on both terminal handlers, so a
   long-lived daemon cannot leak one file descriptor per run it has ever started.
 - New modules, each with its own suite: `bg-steer.mjs`, `bg-lane-rules.mjs`, `bg-codex.mjs`,
-  `codex-account.mjs`. Suite total is 484 assertions across 11 files to 739 across 16, plus a probe
+  `codex-account.mjs`. Suite total is 484 assertions across 11 files to 763 across 16, plus a probe
   (`scripts/probes/steer-probe.mjs`) that drives a steer end to end into a fake worker with no model
   spend.
+- A handed-over job now runs in the repo its BRIEF names rather than wherever the chat happens to be
+  pointed. `--sandbox workspace-write` is rooted at one directory, so a job about repo X that ran in
+  repo Y either could not do its work or would edit same-named files in the wrong tree.
+  `bg-lane-rules.mjs` gained `briefRepo`, which reads the workspace root from config instead of
+  assuming one.
+- The rate-limit fallback refuses a Claude slash command on the `bg.mjs` path too, not only on the
+  `bg:` one. `/autopilot` reached Codex as a literal prompt with write access; it now waits for the
+  reset, and the handoff notice says that is why it is sitting still.
+- A Codex run adopted from a previous daemon is only ever signalled while it is still alive, checked
+  again when its re-armed deadline fires and released when it reports. A pid is a reusable number,
+  and a stale registry entry could otherwise SIGTERM whatever inherited it.
+- `codexParkedNote` clips both halves of a parked pair. A wall parks up to ten of them, and a
+  `--file` brief and a Codex report are each large enough that ten of both went into one prompt the
+  moment the wall lifted.
 
 ## 1.3.0 (2026-09-03)
 

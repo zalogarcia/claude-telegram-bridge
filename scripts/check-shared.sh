@@ -59,20 +59,37 @@ SHARED_MODULES=(
   credential-store.test.mjs
 )
 
-# NOT LISTED, and why. These four modules were ported from the private sibling
-# and are functionally identical, but they carry the owner's name in their
-# comments there and cannot say it here, so byte-identity is unreachable until
-# the private copies are genericized:
+# NOT LISTED, and why. These modules came from the private sibling and behave
+# the same way, but they have DIVERGED and cannot be byte-identical. Two
+# separate reasons, kept apart because only the first one is ever going away:
 #
-#   bg-steer.mjs        + its test   (the steer framing names the assistant)
-#   bg-codex.mjs        + its test   (comments; a hardcoded default timezone)
-#   codex-account.mjs   + its test   (comments)
-#   bg-codex-wiring.test.mjs         (harness stubs differ: no full-report file here)
+# (a) The private copies name the owner and his machine, and a public repo
+#     cannot repeat that. Byte-identity waits on the private side being
+#     genericized, not on anything here:
 #
-# Once the private side drops those references, both lists can take them and the
-# divergence stops being a matter of trust. bg-lane-rules.mjs and bg.mjs are
-# public-only shapes and are not candidates: bg.mjs carries this repo's config
-# layer, and the private repo has no bg-lane-rules.mjs at all.
+#       bg-steer.mjs        + its test   (the steer framing names the assistant)
+#       codex-account.mjs   + its test   (comments; a city in one of them)
+#       bg-codex.mjs        + its test   (comments; a hardcoded default timezone,
+#                                        which here means the machine's own)
+#
+# (b) This repo carries fixes the private one does not, found by the QA pass on
+#     the port (2026-09-04). Listing these would make the gate demand that the
+#     private repo REGRESS to match:
+#
+#       bg-codex.mjs        codexParkedNote clips both halves of a parked pair;
+#                           unclipped, ten `--file` briefs plus ten Codex answers
+#                           go into one prompt when the wall lifts
+#       bg-steer.mjs        carries parseRunId, which lives in the private
+#                           bg-notify.mjs (a module this repo does not have)
+#
+#       bg-codex-wiring.test.mjs   harness stubs differ throughout (no full-report
+#                                  file here), plus the sections covering the two
+#                                  fixes above
+#
+# bg-lane-rules.mjs and bg.mjs are public-only shapes and are not candidates:
+# bg.mjs carries this repo's config layer, and the private repo has no
+# bg-lane-rules.mjs at all (its stripLaneRules, briefTitle and briefRepo live in
+# bg-notify.mjs alongside owner-specific notice text).
 
 if [ ! -d "$SIBLING" ]; then
   echo "check-shared: sibling repo not found at $SIBLING" >&2

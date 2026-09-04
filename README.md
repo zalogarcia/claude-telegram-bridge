@@ -251,9 +251,9 @@ or `latest` for the most recently started worker. `bg.mjs ps` prints the table
 that names all of them:
 
 ```
-RUNID             LANE  PID    ELAPSED  STEPS  STEER  SENT  ENGINE  TITLE
-bg-1788453512237  bg    41022  18m      64     yes    1     claude  Port the second engine
-bg2-1788453999999 bg2   41190  4m       9      no     0     claude  Rebuild the search index
+RUNID              LANE  PID    ELAPSED  STEPS  STEER  SENT  ENGINE  TITLE
+bg-1788453512237   bg    41022  18m      64     yes    1     claude  Port the second engine
+bg2-1788453999999  bg2   41190  4m       9      no     0     claude  Rebuild the search index
 ```
 
 **`STEER: no` is the honest answer, not a bug.** A worker that outlived a daemon
@@ -311,6 +311,13 @@ A Codex run shows up everywhere a background worker does: in `/status`, in
 `bg.mjs ps` with `ENGINE: codex`, in the run registry, and `/stop codex` kills
 it. It is never steerable: Codex reads its prompt once, from stdin, and never
 again.
+
+A handed-over job runs with `--sandbox workspace-write`, which is rooted at
+**one** directory, so Leash reads which repo the brief is about and runs it
+there: an explicit `Repo: <name>` line in the opening block wins, otherwise a
+path under your default working directory, otherwise the directory the chat is
+`/cd`'d to. A named repo that is not checked out on this machine falls back to
+the chat's directory rather than being guessed at.
 
 **The fallback.** While every enrolled Claude account is rate limited:
 

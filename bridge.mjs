@@ -51,10 +51,11 @@ import {
   spawnWorker,
   tailLines,
   bgOutcome,
+  pidAlive,
   createInflightRegistry,
   createWorkerWatchdog,
 } from './detached-workers.mjs';
-import { briefTitle, stripLaneRules } from './bg-lane-rules.mjs';
+import { briefRepo, briefTitle, stripLaneRules } from './bg-lane-rules.mjs';
 import {
   STEER_RECORD_MAX,
   STEER_SOCK_NAME,
@@ -548,12 +549,6 @@ function runClaude(rawText, lane = LANES.main) {
     child.stdin.on('error', () => {}); // EPIPE from a dead child must not crash the daemon
     const userMsg = (t) => JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: t }] } }) + '\n';
     child.stdin.write(userMsg(text));
-    // Background lanes are fire-and-forget and self-contained by contract (a
-    // handoff never sees the chat conversation, so there is nothing to steer
-    // into). Closing stdin NOW cuts the last pipe tying the worker to us, and is
-    // also what lets a detached worker FINISH after the daemon is gone — the CLI
-    // only exits once stdin closes, and a still-open stdin on a dead parent
-    // would leave it waiting forever for input nobody can send.
     // BACKGROUND LANES KEEP STDIN OPEN TOO. They used to close it here, which
     // made a dispatched worker unreachable: the only way to correct its
     // instructions was `kill` plus a full re-dispatch, throwing away a context
@@ -1097,10 +1092,15 @@ const watchdog = createWorkerWatchdog({
   // over a perfectly good answer. Re-derive it from the Codex artifacts instead.
   // Detected off the run id (`codex-<startedAt>`), which is the one thing that
   // survives the registry entry being cleared.
-  onOutcome: (task, outcome, runId) =>
-    String(runId || '').startsWith(`${CODEX_LANE}-`)
-      ? reportCodexOutcome(task, codexOutcomeFromDisk(runId), runId, codexBeforeRestart.get(runId) || {})
-      : reportBgOutcome(task, outcome, runId, { steers: steersBeforeRestart.get(runId) || [] }),
+  onOutcome: (task, outcome, runId) => {
+    if (!String(runId || '').startsWith(`${CODEX_LANE}-`)) {
+      return reportBgOutcome(task, outcome, runId, { steers: steersBeforeRestart.get(runId) || [] });
+    }
+    // Its report is in: disarm the deadline this daemon re-armed at boot, or it
+    // fires later at a pid that may have been recycled.
+    releaseCodexSurvivor(runId);
+    return reportCodexOutcome(task, codexOutcomeFromDisk(runId), runId, codexBeforeRestart.get(runId) || {});
+  },
 });
 const { reapDeadWorkers, reattachLiveWorkers, pruneRunLogs } = watchdog;
 
@@ -1870,10 +1870,26 @@ const CODEX_MISSING_LINE = `🧠 Codex is not installed (no \`${CODEX_BIN}\` on 
 // A Codex run that outlived the daemon: keep what its report will need, and
 // re-arm its deadline. The kill timer lives in the process that spawned it, so a
 // restart silently removed the only bound on a billed run.
+//
+// EVERY signal here is gated on the pid still being alive AND still being the
+// run we adopted, twice: once now and once when the timer fires. A pid is a
+// reusable number. Between adopting a stale registry entry at boot and a
+// deadline up to CODEX_TIMEOUT_MS later, the process behind it can exit and the
+// number be handed to something else entirely, and this would SIGTERM that
+// instead. The registry outlives the daemon, so a stale entry from a machine
+// that was asleep is the normal case, not the exotic one.
+const codexSurvivorTimers = new Map(); // registry id -> the re-armed deadline
+
 function adoptCodexSurvivor(id, rec) {
   codexBeforeRestart.set(id, { mode: rec.mode || 'ask', cwd: rec.cwd || null });
-  if (!rec.pid || !(Number.isFinite(CODEX_TIMEOUT_MS) && CODEX_TIMEOUT_MS > 0)) return;
+  if (!rec.pid || !pidAlive(rec.pid)) return; // already gone: nothing to bound, and nothing to signal
+  if (!(Number.isFinite(CODEX_TIMEOUT_MS) && CODEX_TIMEOUT_MS > 0)) return;
   const kill = () => {
+    codexSurvivorTimers.delete(id);
+    // Re-checked at fire time, not just at adoption: the run may have finished
+    // in between, which is the common case after a `safe-restart.sh --allow-bg`
+    // over a job with minutes left to run.
+    if (!inflight.read()[id] || !pidAlive(rec.pid)) return;
     try {
       process.kill(rec.pid, 'SIGTERM');
       console.log(`[bridge] codex survivor ${id} passed its deadline, terminated`);
@@ -1882,8 +1898,21 @@ function adoptCodexSurvivor(id, rec) {
     }
   };
   const left = (rec.startedAt || 0) + CODEX_TIMEOUT_MS - Date.now();
-  if (left <= 0) kill();
-  else setTimeout(kill, left).unref?.();
+  if (left <= 0) {
+    kill();
+    return;
+  }
+  const timer = setTimeout(kill, left);
+  timer.unref?.();
+  codexSurvivorTimers.set(id, timer);
+}
+
+// The survivor reported: disarm its re-armed deadline. Without this the timer
+// still fires, and by then the pid may belong to something else.
+function releaseCodexSurvivor(id) {
+  const timer = codexSurvivorTimers.get(id);
+  if (timer) clearTimeout(timer);
+  codexSurvivorTimers.delete(id);
 }
 
 // /stop reaches lanes; a Codex run lives in no lane, so without this it kept
@@ -2201,13 +2230,24 @@ function drainBgHandoff() {
       send(CODEX_MISSING_LINE, { markdown: false }).catch(() => {});
       continue;
     }
-    if (decision.engine === 'codex') {
+    // A Claude SLASH COMMAND is the one thing the fallback will not take. It is
+    // matched against the STRIPPED brief, because bg.mjs prepends the LANE RULES
+    // header and a raw test would never see the `/autopilot` on the first real
+    // line. Only the FALLBACK is refused: `--engine codex` on a slash command is
+    // someone asking for it by name, and that is their call to make.
+    const fallbackSlashCommand =
+      decision.reason === 'claude_limited' && BG_COMMAND_RE.test(stripLaneRules(text).trimStart());
+    if (decision.engine === 'codex' && !fallbackSlashCommand) {
       // DISPATCH FIRST, then decorate: the queue file was already claimed above,
       // so anything that throws before the spawn destroys the brief with no
       // record of it anywhere.
       runCodex(text, {
         mode: 'edit', // a handed-off job is work, not a question
-        cwd: existsSync(chatState().cwd) ? chatState().cwd : DEFAULT_CWD,
+        cwd: codexCwdForBrief(briefRepo(text, { workspaceDir: DEFAULT_CWD, fallbackDir: chatState().cwd }), {
+          devDir: DEFAULT_CWD,
+          fallbackCwd: existsSync(chatState().cwd) ? chatState().cwd : DEFAULT_CWD,
+          exists: existsSync,
+        }),
         reason: decision.reason,
         pausedUntil: decision.pausedUntil,
       });
@@ -2216,7 +2256,15 @@ function drainBgHandoff() {
     // briefTitle, not a raw clip: bg.mjs prepends the LANE RULES header, so
     // clipping the composed text would make every handoff notice byte-identical
     // boilerplate. The title is the first real line of the brief.
-    send(`🌙 Handed to the background lane: ${briefTitle(text, 240)}`, { markdown: false }).catch(() => {});
+    //
+    // A job that lands on a walled lane sits still for hours, which is
+    // indistinguishable from a job that was dropped unless the notice says so.
+    send(
+      `🌙 Handed to the background lane: ${briefTitle(text, 240)}${
+        fallbackSlashCommand ? '\n⏸ It is a Claude command, so it waits for the reset rather than running on Codex.' : ''
+      }`,
+      { markdown: false },
+    ).catch(() => {});
     dispatchPrompt(text, getBgLane(), { priority: true }); // already claimed out of the file — must not be dropped
   }
 }
@@ -3238,7 +3286,13 @@ function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallba
     if (decision.engine === 'codex' && lane.isBg && !BG_COMMAND_RE.test(text.trimStart())) {
       runCodex(text, {
         mode: 'edit',
-        cwd: existsSync(chatState().cwd) ? chatState().cwd : DEFAULT_CWD,
+        // Same repo resolution as the bg.mjs handoff: workspace-write is rooted
+        // at ONE directory, so a `bg:` job about another repo has to run there.
+        cwd: codexCwdForBrief(briefRepo(text, { workspaceDir: DEFAULT_CWD, fallbackDir: chatState().cwd }), {
+          devDir: DEFAULT_CWD,
+          fallbackCwd: existsSync(chatState().cwd) ? chatState().cwd : DEFAULT_CWD,
+          exists: existsSync,
+        }),
         reason: decision.reason,
         pausedUntil: decision.pausedUntil,
       });

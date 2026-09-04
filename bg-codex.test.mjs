@@ -16,6 +16,8 @@ import {
   CODEX_LANE,
   CODEX_MODES,
   CODEX_PREFIX_RE,
+  PARKED_ANSWER_MAX,
+  PARKED_PROMPT_MAX,
   buildCodexArgs,
   codexCwdForBrief,
   codexFallbackPrefix,
@@ -585,6 +587,31 @@ t('the parked note forbids a second answer', () => {
 t('a parked item whose codex run failed still renders', () => {
   const n = codexParkedNote({ items: [{ prompt: 'x' }] });
   ok(n.includes('the Codex run failed'), n);
+});
+
+t('★ both halves of a parked pair are clipped', () => {
+  // A wall parks up to ten pairs, and a `--file` handoff is a whole brief while
+  // a Codex answer is a whole report. Unclipped, the note is a several-hundred-
+  // kilobyte prompt written into the chat lane the moment the wall lifts. Both
+  // halves already reached the owner in full; this is context, not delivery.
+  const n = codexParkedNote({
+    items: [{ prompt: 'B'.repeat(20_000), answer: 'A'.repeat(50_000) }],
+  });
+  ok(n.length < 3000, `the note is ${n.length} chars, which is not a clip`);
+  ok(n.includes('B'.repeat(PARKED_PROMPT_MAX)), 'the head of the brief must survive');
+  ok(!n.includes('B'.repeat(PARKED_PROMPT_MAX + 1)), 'the brief was not clipped');
+  ok(n.includes('A'.repeat(PARKED_ANSWER_MAX)), 'the head of the answer must survive');
+  ok(!n.includes('A'.repeat(PARKED_ANSWER_MAX + 1)), 'the answer was not clipped');
+  ok(/full text is in bg-results\.jsonl/.test(n), 'a clip must say where the rest is');
+});
+
+t('a short parked pair is untouched, and never says the owner "asked"', () => {
+  // A background brief handed over from a terminal is not a question anyone
+  // asked, and framing it as one invites an answer to something nobody said.
+  const n = codexParkedNote({ ownerName: 'Sam', items: [{ prompt: 'run the suite', answer: '14 pass' }] });
+  ok(n.includes('Sam sent: run the suite'), n);
+  ok(!/asked:/.test(n), n);
+  ok(!/clipped/.test(n), 'a short pair must not be decorated with a clip marker');
 });
 
 console.log(`\n${pass} passed, ${failures.length} failed\n`);

@@ -14,12 +14,12 @@
 //   ★ a run past the deadline is killed and REPORTED, not left hanging
 //
 // bridge.mjs runs main() on import, so it is extracted by source and evaluated
-// against stubs, the same trick test.mjs and bg-notify.test.mjs use. No network,
+// against stubs, the same trick test.mjs uses. No network,
 // no Telegram, no OpenAI spend: the fake binary is a shell script.
 //
 //   node bg-codex-wiring.test.mjs
 
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -509,7 +509,8 @@ const P = await import(
     encodeURIComponent(
       [
         `
-import { shouldRouteToCodex } from ${url('bg-codex.mjs')};
+import { codexCwdForBrief, shouldRouteToCodex } from ${url('bg-codex.mjs')};
+import { briefRepo } from ${url('bg-lane-rules.mjs')};
 import fs from 'node:fs';
 const { existsSync } = fs;
 export const SENT = [];
@@ -522,7 +523,9 @@ export const bgLanes = [];
 let bgSeq = 0;
 const BG_TASK_TIMEOUT_MS = 1;
 const DEFAULT_CWD = ${JSON.stringify(TMP)};
-const chatState = () => ({ cwd: ${JSON.stringify(TMP)} });
+export let CHAT_CWD = ${JSON.stringify(TMP)};
+export const setChatCwd = (p) => { CHAT_CWD = p; };
+const chatState = () => ({ cwd: CHAT_CWD });
 const runClaude = (text, lane) => { CLAUDE.push({ text, lane: lane.name }); return Promise.resolve(); };
 const runCodexChatFallback = (text, decision) => { CHAT_FALLBACK.push({ text, decision }); };
 const runCodex = (text, opts) => { CODEX.push({ text, ...opts }); return { runId: 'codex-1' }; };
@@ -531,7 +534,7 @@ let codexFallbackValue = true;
 export const setWall = (until, fallback = true) => { rotationPausedUntil = until; codexFallbackValue = fallback; };
 const codexFallbackOn = () => codexFallbackValue;
 const codexInstalled = () => true;
-export const reset = () => { SENT.length = 0; CLAUDE.length = 0; CHAT_FALLBACK.length = 0; CODEX.length = 0; bgLanes.length = 0; bgSeq = 0; rotationPausedUntil = 0; codexFallbackValue = true; LANES.main.current = null; LANES.main.queue.length = 0; };
+export const reset = () => { SENT.length = 0; CLAUDE.length = 0; CHAT_FALLBACK.length = 0; CODEX.length = 0; bgLanes.length = 0; bgSeq = 0; rotationPausedUntil = 0; codexFallbackValue = true; CHAT_CWD = ${JSON.stringify(TMP)}; LANES.main.current = null; LANES.main.queue.length = 0; };
 `,
         grab('BG_COMMAND_RE', 'const'),
         grab('QUEUE_MAX', 'const'),
@@ -607,6 +610,34 @@ P.dispatchPrompt('is the deploy green', undefined, { allowCodexFallback: true })
 await t('with Claude healthy nothing is diverted', () => {
   eq(P.CHAT_FALLBACK.length, 0);
   eq(P.CLAUDE.length, 1);
+});
+
+// WHERE a diverted job is allowed to write. `--sandbox workspace-write` is
+// rooted at exactly one directory, so a job about repo X that runs in repo Y
+// either cannot do its work or edits same-named files in the wrong tree.
+const REPO_A = path.join(TMP, 'media-tools');
+const REPO_B = path.join(TMP, 'other-repo');
+mkdirSync(REPO_A, { recursive: true });
+mkdirSync(REPO_B, { recursive: true });
+
+P.reset();
+P.setWall(WALL);
+P.setChatCwd(REPO_B); // the chat is pointed somewhere else entirely
+P.dispatchPrompt('bg: # TASK: fix the encoder\nRepo: media-tools\n', undefined, { allowCodexFallback: true });
+
+await t('★ a diverted job runs in the repo its BRIEF names, not the chat cwd', () => {
+  eq(P.CODEX.length, 1);
+  eq(P.CODEX[0].cwd, REPO_A, 'workspace-write was rooted at the wrong tree');
+});
+
+P.reset();
+P.setWall(WALL);
+P.setChatCwd(REPO_B);
+P.dispatchPrompt('bg: # TASK: fix the encoder\nRepo: not-checked-out-here\n', undefined, { allowCodexFallback: true });
+
+await t('a repo that is not checked out here falls back to the chat cwd', () => {
+  eq(P.CODEX.length, 1);
+  eq(P.CODEX[0].cwd, REPO_B, 'a guess at a directory that does not exist is worse than the cwd');
 });
 
 // ---------------------------------------------------------------------------
@@ -685,6 +716,231 @@ await t('★ the guards are actually wired into the command and dispatch paths',
   ok(/allowCodexFallback && !priority && codexInstalled\(\)/.test(src), 'the chat fallback would spawn a missing binary');
   ok(/wanted === 'codex' && !codexInstalled\(\)/.test(src), 'a --engine codex job would silently run on Claude');
   ok(/codexInstalled\(\) \? ` · codex fallback/.test(src), '/status advertises an engine that is not installed');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\n10. adopting a Codex run that outlived the daemon');
+// ---------------------------------------------------------------------------
+// The re-armed deadline is a SIGTERM scheduled up to CODEX_TIMEOUT_MS out, at a
+// pid this daemon never spawned. A pid is a reusable number, and the registry
+// outlives the daemon, so "the entry is stale and that pid is now something
+// else" is the ordinary case after a machine sleeps. Every signal has to be
+// gated on the run still being live, at fire time and not only at adoption.
+
+const A = await import(
+  'data:text/javascript,' +
+    encodeURIComponent(
+      [
+        `
+export let CODEX_TIMEOUT_MS = 60_000;
+export const setTimeoutMs = (n) => { CODEX_TIMEOUT_MS = n; };
+export const codexBeforeRestart = new Map();
+export const registry = new Map();
+export let ALIVE = new Set();
+export const setAlive = (pids) => { ALIVE = new Set(pids); };
+const pidAlive = (pid) => ALIVE.has(pid);
+const inflight = { read: () => Object.fromEntries(registry) };
+`,
+        grab('adoptCodexSurvivor'),
+        grab('releaseCodexSurvivor'),
+        grab('codexSurvivorTimers', 'const'),
+        'export { adoptCodexSurvivor, releaseCodexSurvivor, codexSurvivorTimers };',
+      ].join('\n'),
+    )
+);
+
+// process.kill is the global the extracted source reaches for, so the spy goes
+// on the global and comes straight back off.
+const realKill = process.kill.bind(process);
+const SIGNALS = [];
+const spyKill = () => {
+  SIGNALS.length = 0;
+  process.kill = (pid, sig) => SIGNALS.push([pid, sig]);
+};
+const unspyKill = () => {
+  process.kill = realKill;
+};
+
+await t('★ a stale registry entry whose pid is gone is never signalled', () => {
+  spyKill();
+  try {
+    A.registry.clear();
+    A.setAlive([]); // the pid died while the daemon was down; the number may be reused
+    A.registry.set('codex-1', { pid: 424242, startedAt: Date.now() - 3 * 60 * 60_000, mode: 'edit' });
+    A.adoptCodexSurvivor('codex-1', A.registry.get('codex-1'));
+    eq(SIGNALS.length, 0, `signalled a dead pid: ${JSON.stringify(SIGNALS)}`);
+    eq(A.codexSurvivorTimers.size, 0, 'a dead survivor must not arm a deadline either');
+  } finally {
+    unspyKill();
+  }
+});
+
+await t('a live survivor past its deadline IS terminated', () => {
+  spyKill();
+  try {
+    A.registry.clear();
+    A.setAlive([515151]);
+    A.registry.set('codex-2', { pid: 515151, startedAt: Date.now() - 3 * 60 * 60_000, mode: 'edit' });
+    A.adoptCodexSurvivor('codex-2', A.registry.get('codex-2'));
+    eq(SIGNALS.length, 1);
+    eq(SIGNALS[0][0], 515151);
+    eq(SIGNALS[0][1], 'SIGTERM');
+  } finally {
+    unspyKill();
+  }
+});
+
+await t('★ a survivor that reports first disarms its deadline', async () => {
+  spyKill();
+  try {
+    A.registry.clear();
+    A.setTimeoutMs(120); // the production deadline is 30 min; this is the same shape
+    A.registry.set('codex-3', { pid: 626262, startedAt: Date.now(), mode: 'edit' });
+    A.setAlive([626262]);
+    A.adoptCodexSurvivor('codex-3', A.registry.get('codex-3'));
+    eq(A.codexSurvivorTimers.size, 1, 'a live survivor must be bounded');
+    // It finishes: the re-attach poll clears the registry and reports, and the
+    // daemon releases the deadline it armed.
+    A.registry.delete('codex-3');
+    A.releaseCodexSurvivor('codex-3');
+    eq(A.codexSurvivorTimers.size, 0);
+    await new Promise((r) => setTimeout(r, 250)); // well past when it would have fired
+    eq(SIGNALS.length, 0, `signalled after the run was already over: ${JSON.stringify(SIGNALS)}`);
+  } finally {
+    A.setTimeoutMs(60_000);
+    unspyKill();
+  }
+});
+
+await t('★ an undisarmed timer still refuses to fire once the run is off the registry', async () => {
+  // Belt and braces: the reaper clears a registry entry without going through
+  // onOutcome, so the fire-time check has to stand on its own.
+  spyKill();
+  try {
+    A.registry.clear();
+    A.setTimeoutMs(120);
+    A.registry.set('codex-4', { pid: 737373, startedAt: Date.now(), mode: 'edit' });
+    A.setAlive([737373]);
+    A.adoptCodexSurvivor('codex-4', A.registry.get('codex-4'));
+    A.registry.delete('codex-4'); // reaped, no release call
+    await new Promise((r) => setTimeout(r, 250));
+    eq(SIGNALS.length, 0, `signalled a pid the daemon no longer owns: ${JSON.stringify(SIGNALS)}`);
+    eq(A.codexSurvivorTimers.size, 0, 'the fired timer must forget itself');
+  } finally {
+    A.setTimeoutMs(60_000);
+    unspyKill();
+  }
+});
+
+await t('the deadline is wired into the boot loop, and released when a survivor reports', () => {
+  const src = SRC.join('\n');
+  ok(/if \(rec\?\.engine === 'codex'\) adoptCodexSurvivor\(id, rec\)/.test(src), 'survivors are not adopted at boot');
+  ok(/releaseCodexSurvivor\(runId\)/.test(src), "a survivor's report does not disarm its deadline");
+});
+
+// ---------------------------------------------------------------------------
+console.log('\n11. drainBgHandoff: what the wall diverts on the bg.mjs path');
+// ---------------------------------------------------------------------------
+// The `bg.mjs` drop-box is the PRIMARY way a job arrives, and it is a separate
+// code path from dispatchPrompt with its own routing decision. Section 8 proves
+// the phone path; this proves the terminal one, which is the one three doc
+// surfaces make promises about.
+
+const QUEUE = path.join(TMP, 'bg-queue.json');
+const DRAIN_HARNESS = `
+import fs from 'node:fs';
+import { codexCwdForBrief, parseEnginePrefix, shouldRouteToCodex } from ${url('bg-codex.mjs')};
+import { briefRepo, briefTitle, stripLaneRules } from ${url('bg-lane-rules.mjs')};
+const { existsSync, readFileSync, writeFileSync, renameSync } = fs;
+const BG_QUEUE_FILE = ${JSON.stringify(QUEUE)};
+const DEFAULT_CWD = ${JSON.stringify(TMP)};
+export const SENT = [];
+export const CODEX = [];
+export const CLAUDE = [];
+const send = (t) => { SENT.push(t); return Promise.resolve(); };
+const runCodex = (text, opts) => { CODEX.push({ text, ...opts }); return { runId: 'codex-1' }; };
+const dispatchPrompt = (text, lane) => { CLAUDE.push({ text, lane: lane?.name }); };
+const getBgLane = () => ({ name: 'bg' });
+export let CHAT_CWD = ${JSON.stringify(TMP)};
+export const setChatCwd = (p) => { CHAT_CWD = p; };
+const chatState = () => ({ cwd: CHAT_CWD });
+export let rotationPausedUntil = 0;
+let installed = true;
+let fallback = true;
+export const setWall = (until, opts = {}) => {
+  rotationPausedUntil = until;
+  if (opts.installed !== undefined) installed = opts.installed;
+  if (opts.fallback !== undefined) fallback = opts.fallback;
+};
+const codexInstalled = () => installed;
+const codexFallbackOn = () => fallback;
+const CODEX_MISSING_LINE = 'Codex is not installed';
+export const reset = () => {
+  SENT.length = 0; CODEX.length = 0; CLAUDE.length = 0;
+  rotationPausedUntil = 0; installed = true; fallback = true;
+  CHAT_CWD = ${JSON.stringify(TMP)};
+};
+`;
+const DRAIN = await import(
+  'data:text/javascript,' +
+    encodeURIComponent([DRAIN_HARNESS, grab('BG_COMMAND_RE', 'const'), grab('drainBgHandoff'), 'export { drainBgHandoff };'].join('\n'))
+);
+
+// bg.mjs prepends this preamble to every brief, so the guard has to see PAST it.
+const laneRules = (job) => `LANE RULES (you are a background worker: headless).\n1. NEVER use run_in_background.\n\n--- TASK ---\n${job}`;
+const queue = (...items) => writeFileSync(QUEUE, JSON.stringify(items));
+
+DRAIN.reset();
+DRAIN.setWall(WALL);
+queue({ text: laneRules('/autopilot ship the checkout fix') });
+DRAIN.drainBgHandoff();
+
+await t('★ a Claude slash command handed over during the wall does NOT reach Codex', () => {
+  // Three doc surfaces promise this (README, CHANGELOG 1.4.0, docs/multi-account).
+  // Without it, `codex exec --sandbox workspace-write` is handed the literal
+  // text "/autopilot ship the checkout fix" with write access to a repo.
+  eq(DRAIN.CODEX.length, 0, 'Codex cannot run a Claude slash command');
+  eq(DRAIN.CLAUDE.length, 1, 'it waits on the Claude lane instead');
+});
+
+await t('and the notice says WHY it is sitting still', () => {
+  // A job on a walled lane does nothing for hours; silence reads as "dropped".
+  ok(/waits for the reset/.test(DRAIN.SENT.join('\n')), DRAIN.SENT.join('\n'));
+});
+
+DRAIN.reset();
+DRAIN.setWall(WALL);
+queue({ text: laneRules('# TASK: fix the encoder\nRepo: media-tools\n') });
+DRAIN.setChatCwd(REPO_B);
+DRAIN.drainBgHandoff();
+
+await t('★ an ordinary job IS diverted, and runs in the repo its brief names', () => {
+  eq(DRAIN.CODEX.length, 1);
+  eq(DRAIN.CODEX[0].mode, 'edit');
+  eq(DRAIN.CODEX[0].reason, 'claude_limited');
+  eq(DRAIN.CODEX[0].cwd, REPO_A, 'workspace-write was rooted at the chat cwd, not the brief repo');
+});
+
+DRAIN.reset();
+DRAIN.setWall(WALL);
+queue({ text: laneRules('/autopilot ship it'), engine: 'codex' });
+DRAIN.drainBgHandoff();
+
+await t('--engine codex on a slash command is honoured: asking for it by name is a deliberate choice', () => {
+  // The guard is on the FALLBACK, not on the engine. Refusing an explicit
+  // request would be the daemon overruling a person who typed the flag.
+  eq(DRAIN.CODEX.length, 1);
+  eq(DRAIN.CODEX[0].reason, 'explicit');
+});
+
+DRAIN.reset();
+queue({ text: laneRules('/autopilot ship it') });
+DRAIN.drainBgHandoff();
+
+await t('with Claude healthy a slash command goes to the bg lane as always', () => {
+  eq(DRAIN.CODEX.length, 0);
+  eq(DRAIN.CLAUDE.length, 1);
+  ok(!/waits for the reset/.test(DRAIN.SENT.join('\n')), 'nothing is waiting, so nothing should say so');
 });
 
 rmSync(TMP, { recursive: true, force: true });
