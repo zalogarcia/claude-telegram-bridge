@@ -204,11 +204,11 @@ export function fetchFailedLine(what, error) {
  * OUTCOME is deliberately not here. It is M's to say in her own words once she
  * has read the salvage, so this line stops after saying who is holding it.
  */
-export function deadWorkerLine({ lane = 'a worker', elapsedSec = null, title = '', phase = 'checking' } = {}) {
+export function deadWorkerLine({ lane = 'a worker', elapsedSec = null, title = '', phase = 'checking', name = 'Leash' } = {}) {
   const el = Number.isFinite(elapsedSec) && elapsedSec > 0 ? ` after ${fmtElapsed(Math.round(elapsedSec))}` : '';
   const lines = [`⚠️ ${lane} died${el}`];
   if (title) lines.push(clip(oneLine(title), 90));
-  lines.push(phase === 'salvaging' ? 'M is going through the salvage now.' : 'Checking what survived…');
+  lines.push(phase === 'salvaging' ? `${name} is going through the salvage now.` : 'Checking what survived…');
   return lines.join('\n');
 }
 
@@ -218,14 +218,14 @@ export function chainPausedLine(max) {
 }
 
 /**
- * Claude came back and M is being handed what Codex answered while she was out.
+ * Claude is back and is being handed what Codex answered while it was walled.
  *
- * Without this the flush is a bubble with no cause: he sees M start thinking
- * about nothing, minutes after the last thing either of them said.
+ * Without this the flush is a bubble with no cause: the assistant starts
+ * thinking about nothing, minutes after the last thing either side said.
  */
-export function codexCatchUpLine(count) {
+export function codexCatchUpLine(count, { name = 'Leash' } = {}) {
   const n = Number(count) || 0;
-  return [`▶️ Claude is back`, `🧠 Catching M up on ${n} Codex ${n === 1 ? 'answer' : 'answers'}`].join('\n');
+  return [`▶️ Claude is back`, `🧠 Catching ${name} up on ${n} Codex ${n === 1 ? 'answer' : 'answers'}`].join('\n');
 }
 
 // ---------------------------------------------------------------------------

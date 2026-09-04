@@ -264,6 +264,35 @@ function conf(key, fallback = undefined) {
   return process.env[envKey] ?? fileConfig[key] ?? fallback;
 }
 
+// A boolean tunable, honouring the environment layer. `BRIDGE_YOLO=false` has
+// always worked because that read coerces; these did not, so a user turning off
+// a model-spending feature was ignored and kept paying for it.
+function confBool(key, fallback) {
+  const v = conf(key, fallback);
+  if (typeof v !== 'string') return Boolean(v);
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
+  return Boolean(fallback);
+}
+
+// An object tunable (`style`, `progress`). From config.json it arrives as an
+// object; from the environment it can only arrive as JSON text, and anything
+// that is not parseable JSON degrades to {} rather than throwing at boot.
+function confObj(key) {
+  const v = conf(key);
+  if (v && typeof v === 'object') return v;
+  if (typeof v === 'string' && v.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(v);
+      if (parsed && typeof parsed === 'object') return parsed;
+    } catch {
+      console.error(`[bridge] ${key} is not valid JSON, ignoring it`);
+    }
+  }
+  return {};
+}
+
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || fileConfig.botToken || claudeSettingsEnv.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || fileConfig.chatId || claudeSettingsEnv.TELEGRAM_CHAT_ID || '');
 
@@ -367,11 +396,13 @@ const CODEX_MODEL = conf('codexModel', '') || null; // empty = the CLI's own def
 // config.json to pin the chat lane back to `codex exec` (the fallback path is
 // kept intact and is reached automatically on an older CLI anyway).
 const CODEX_APP_SERVER = String(conf('codexAppServer', 'true')) !== 'false';
-// NO EM DASHES ON THE WAY OUT. The owner's standing rule for their own copy, and Codex
-// writes them by default where Claude has been trained off them. Off in
-// config.example.json so a Leash user keeps their model's own voice; on here.
-// See dash-normalize.mjs for what it will and will not touch.
-const NO_DASHES = String(conf('style', {})?.noDashes ?? conf('noDashes', 'false')) === 'true';
+// NO EM DASHES ON THE WAY OUT. Codex writes them by default where Claude has
+// been trained off them by its CLAUDE.md, so a two-engine
+// bridge answers in two registers unless something normalizes at the funnel.
+// OFF by default here: the model keeps its own voice unless you ask otherwise.
+// See dash-normalize.mjs for what it will and will not touch (code spans,
+// fences, URLs, the handoff markers).
+const NO_DASHES = String(confObj('style').noDashes ?? conf('noDashes', 'false')) === 'true';
 
 // ---------------------------------------------------------------------------
 // IS THE ENGINE EVEN HERE.
@@ -1019,7 +1050,7 @@ const compactElapsed = () => (compactNotice ? Math.round((Date.now() - compactNo
 
 // A Leash user on a busy chat, or with ten workers, can have the old static
 // notice back. Default on: the silence is the defect this fixes.
-const BG_PROGRESS_ON = conf('progress', {})?.background !== false;
+const BG_PROGRESS_ON = String(confObj('progress').background ?? 'true') !== 'false';
 
 // How long a worker line keeps ticking after its run vanished without a
 // terminal edit. Minutes, not seconds: the close handler clears lane.current
@@ -1251,6 +1282,11 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
     // The chat lane keeps pipes — it is interactive and steerable. See
     // ./detached-workers.mjs for why both halves are load-bearing.
     const isBgLane = lane !== LANES.main;
+    // Only the chat lane gets a LIVE bubble. A background job's output reaches
+    // the owner through handBackToChat and its report file, so ticking edits at
+    // its bubble is rate-limit spend against the SAME per-chat bucket the
+    // conversation needs. It still gets one start line and one final edit.
+    const liveProgress = !isBgLane;
     const logPath = isBgLane ? path.join(RUNS_DIR, `${lane.name || 'bg'}-${startedAt}.jsonl`) : null;
     const { child } = spawnWorker(CLAUDE_BIN, args, { cwd, env: { ...process.env }, logPath });
     run.child = child;
@@ -1856,7 +1892,16 @@ const inflight = createInflightRegistry({ file: INFLIGHT_FILE });
 function onDeadWorkers(dead, reason) {
   const lines = dead.map(({ id, rec, ageMs }) => {
     const mins = ageMs != null ? Math.round(ageMs / 60000) : '?';
-    return `  • [${id}] ran ${mins}m before dying — ${clip(oneLine(rec.task || ''), 240)}`;
+    // WHOSE corpse it is. A Codex run has none of this daemon's rules and
+    // cannot be re-fired as a Claude worker, and its meta sidecar is the only
+    // thing /account reads: left at its spawn-time status it would list the run
+    // as in flight forever.
+    const eng = rec.engine === 'codex' ? ' [engine: CODEX, not Claude]' : '';
+    if (rec.engine === 'codex') {
+      const { startedAt } = parseRunId(id);
+      if (startedAt) finalizeCodexMeta(startedAt, { status: 'failed' });
+    }
+    return `  • [${id}]${eng} ran ${mins}m before dying — ${clip(oneLine(rec.task || ''), 240)}`;
   });
   // THE OWNER'S HALF, and it goes out BEFORE the dispatch so the bubble that
   // follows has a visible cause. Without it the chat has heard nothing for
@@ -1868,6 +1913,7 @@ function onDeadWorkers(dead, reason) {
     const { lane } = parseRunId(id);
     return {
       text: deadWorkerLine({
+        name: BRIDGE_NAME,
         lane: lane || rec.lane || 'a worker',
         elapsedSec: ageMs != null ? Math.round(ageMs / 1000) : null,
         title: briefTitle(stripLaneRules(rec.task || '')),
@@ -1910,7 +1956,7 @@ function onDeadWorkers(dead, reason) {
           tick(now) {
             if (LANES.main.current?.prompt === note) {
               this.done = true;
-              editProgress(m.message_id, escHtml(deadWorkerLine({ ...n, phase: 'salvaging' }))).catch(() => {});
+              editProgress(m.message_id, escHtml(deadWorkerLine({ ...n, name: BRIDGE_NAME, phase: 'salvaging' }))).catch(() => {});
               return;
             }
             if (now > deadline) this.done = true;
@@ -2476,8 +2522,9 @@ async function handleLimitDeath(task, outcome, runId, steers = []) {
 
   handBackToChat(
     task,
-    [detail, '', `--- LEASH ACCOUNT ROTATION ---`, ...lines].join('\n'),
-    'died on a session limit; Leash handled the account rotation',
+    [detail, '', `--- ${BRIDGE_NAME.toUpperCase()} ACCOUNT ROTATION ---`, ...lines].join('\n'),
+    `died on a session limit; ${BRIDGE_NAME} handled the account rotation`,
+    runId,
     steers,
   );
 }
@@ -2513,15 +2560,25 @@ function notifyOwnerBgFinished(task, status, runId) {
 // so there is exactly one definition of "what happens when a worker finishes" —
 // including for a worker whose daemon is already gone.
 function reportBgOutcome(task, outcome, runId = null, { steers = [] } = {}) {
-  if (outcome.record != null) recordBgResult(task, outcome.record);
+  // Resolve the id once: the durable row and the file on disk must name the same
+  // report, and the fallback id is time-based.
+  const id = bgReportId(runId);
+  // The owner's own ping, in ADDITION to the handback below, never instead of
+  // it. The report goes to the chat lane, which is what turns it into words; if
+  // that lane is mid-turn, dead, or the relay is simply missed, a 40-minute job
+  // finishes and nothing is said. One line closes that hole. Deliberately first
+  // and deliberately non-throwing: the handback is load bearing and must not be
+  // delayed or lost to a formatting bug in a notification.
+  notifyOwnerBgFinished(task, outcome.status, runId);
+  if (outcome.record != null) recordBgResult(task, outcome.record, bgReportPath(id));
   // Limit detection reads the FAILURE channel only. A worker's ANSWER routinely
   // quotes these phrases verbatim (a usage-audit report can be wall to wall
   // "You've hit your session limit"), and rotating on a quotation would burn
   // accounts for nothing.
   if (outcome.status === 'failed' && isLimitSignal(outcome.answer)) {
-    const op = handleLimitDeath(task, outcome, steers).catch((e) => {
+    const op = handleLimitDeath(task, outcome, id, steers).catch((e) => {
       console.error('[bridge] account rotation failed:', e.message);
-      handBackToChat(task, outcome.answer, outcome.status, runId, steers); // the report must never be lost to a rotation bug
+      handBackToChat(task, outcome.answer, outcome.status, id, steers); // the report must never be lost to a rotation bug
     });
     pendingOps.add(op);
     op.finally(() => pendingOps.delete(op));
@@ -2608,8 +2665,8 @@ async function renderAccountView(status = null) {
 }
 
 // send(), plus an inline keyboard on the LAST chunk. Deliberately its own path
-// rather than a parameter on send(): the copy-button rail in sendHtmlChunk has a
-// process-wide latch (copyBtnOk) that disables it after one rejection, and these
+// rather than a parameter on send(): the rich-block rail in sendResult has a
+// process-wide latch (richOk) that disables it after one rejection, and these
 // buttons must not be able to trip it or be tripped by it. Degrades the same way
 // send() does — buttons first, then formatting, and only a double failure loses
 // the text.
@@ -2951,14 +3008,43 @@ const codexFallbackOn = () => chatState().codexFallback !== false;
 // and every one of them goes through engine-state.mjs, which is where the
 // resolution is tested.
 // ---------------------------------------------------------------------------
-const engineArgs = () => ({ chat: chatState(), config: fileConfig });
+// `engine` is the one key that can legitimately be a bare string ("codex" means
+// both lanes) OR an object, so it gets its own reader rather than confObj.
+function confEngine() {
+  const raw = conf('engine');
+  if (typeof raw !== 'string') return raw;
+  const s = raw.trim();
+  if (!s) return undefined;
+  if (s.startsWith('{')) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      console.error('[bridge] engine is not valid JSON, ignoring it');
+      return undefined;
+    }
+  }
+  return s;
+}
+
+// What engine-state.mjs reads. It takes a plain object rather than calling
+// conf() itself (it owns no paths and no environment), so the env layer has to
+// be applied here or BRIDGE_ENGINE / BRIDGE_CODEX_MODEL / BRIDGE_CODEX_EFFORT
+// would be documented and inert.
+const ENGINE_CONFIG = {
+  ...fileConfig,
+  engine: confEngine(),
+  codexModel: conf('codexModel', '') || undefined,
+  codexEffort: conf('codexEffort', '') || undefined,
+};
+
+const engineArgs = () => ({ chat: chatState(), config: ENGINE_CONFIG });
 // The same, plus availability: every VIEW has to report the EFFECTIVE engine.
 // On a machine with no `claude` binary the setting reads claude and every
 // message runs on Codex, and a view that showed the setting had /model quietly
 // setting a Claude model nothing would ever use.
 const engineViewArgs = () => ({
   chat: chatState(),
-  config: fileConfig,
+  config: ENGINE_CONFIG,
   claudeAvailable: CLAUDE_AVAILABLE,
   codexAvailable: CODEX_AVAILABLE,
 });
@@ -3352,7 +3438,7 @@ function switchHandoff({ leaving, arriving, fresh = false }) {
     pausedUntil: leaving === 'codex' ? codexPausedUntil : rotationPausedUntil,
     authState: leaving === 'codex' ? codexAccount.peek()?.identity?.state || null : null,
     laneBusy: Boolean(LANES.main.current),
-    captureTurn: conf('handoffCaptureTurn', true) !== false,
+    captureTurn: confBool('handoffCaptureTurn', true),
     // IS THERE A CONVERSATION TO SUMMARISE. Without this the Codex arm spawned
     // a COLD `codex exec` (no thread) after a /new or a /cd, asking a model
     // with no context whatsoever to describe work it had never seen, under an
@@ -3664,7 +3750,9 @@ function codexOutcomeFromDisk(runId) {
 // is not a Claude limit and must never rotate an account. Same order for the
 // same reason, the durable row first, then the note to the chat lane.
 function reportCodexOutcome(task, outcome, runId, { mode = 'ask', cwd = null, reason = null, pausedUntil = null } = {}) {
-  if (outcome.record != null) recordBgResult(task, outcome.record, bgReportPath(runId));
+  const id = bgReportId(runId);
+  notifyOwnerBgFinished(task, outcome.status, runId);
+  if (outcome.record != null) recordBgResult(task, outcome.record, bgReportPath(id));
   // THE WALL CASE. Every other background outcome reaches you through the
   // assistant, who turns it into words. During a total limit wall it cannot run
   // at all: the handback would spawn claude, die on the limit, and you would get
@@ -3674,10 +3762,10 @@ function reportCodexOutcome(task, outcome, runId, { mode = 'ask', cwd = null, re
   // to a lane that cannot take it (parked, not queued, is what stops it being
   // answered a second time an hour later).
   if (Date.now() < rotationPausedUntil) {
-    deliverCodexDirect(task, outcome, runId);
+    deliverCodexDirect(task, outcome, id);
     return;
   }
-  handBackToChat(task, outcome.answer, outcome.status, runId, [], {
+  handBackToChat(task, outcome.answer, outcome.status, id, [], {
     engine: 'codex',
     codex: { mode, cwd, tokens: outcome.tokens, reason, pausedUntil },
   });
@@ -3689,8 +3777,11 @@ function reportCodexOutcome(task, outcome, runId, { mode = 'ask', cwd = null, re
 // much of it arrives as one bubble.
 const CODEX_DIRECT_LIMIT = 3500;
 
-function deliverCodexDirect(task, outcome, runId = null) {
-  const reportFile = runId ? bgReportPath(runId) : null;
+function deliverCodexDirect(task, outcome, id) {
+  // WRITTEN, not just named: this is the one delivery path that never reaches
+  // handBackToChat, so if it did not write the report here the bubble would
+  // point at a file nothing creates and everything past the cut would be gone.
+  const full = writeFullReport(id, task, outcome.answer, outcome.status);
   const prefix = codexFallbackPrefix(rotationPausedUntil, { timeZone: OWNER_TZ });
   // Same normalizer as sendResult: this path exists because Claude cannot run, so
   // nothing downstream would otherwise clean it up.
@@ -3701,7 +3792,7 @@ function deliverCodexDirect(task, outcome, runId = null) {
       prefix,
       '',
       text.slice(0, CODEX_DIRECT_LIMIT),
-      ...(text.length > CODEX_DIRECT_LIMIT && reportFile ? ['', `(truncated, the full answer is at ${reportFile})`] : []),
+      ...(text.length > CODEX_DIRECT_LIMIT && full ? ['', `(full answer: ${full.file})`] : []),
       ...(cost ? ['', `(${cost})`] : []),
     ].join('\n'),
     { markdown: false },
@@ -4388,7 +4479,7 @@ function runCodexChatExec(rawText, { images = [], prompt = null, retriedCold = f
   // a workspace-write run that can also reach the internet. It is one turn, it
   // is announced, and `codexHandoffNetwork: true` in config.json turns the
   // narrowing off for anyone who would rather have the network.
-  const box = codexChatBox({ network: carriesHandoff && conf('codexHandoffNetwork', false) !== true ? false : null });
+  const box = codexChatBox({ network: carriesHandoff && !confBool('codexHandoffNetwork', false) ? false : null });
   const cwd = existsSync(st.cwd) ? st.cwd : DEFAULT_CWD;
   const resumed = Boolean(st.codexThreadId);
   const imgs = (images || []).filter(isCodexImage);
@@ -4641,7 +4732,7 @@ function runCodexChatTurn(rawText, { images = [], prompt = null, carriesHandoff 
   // pass the busy check and start two turns on one thread.
   lane.current = run;
 
-  const box = codexChatBox({ network: carriesHandoff && conf('codexHandoffNetwork', false) !== true ? false : null });
+  const box = codexChatBox({ network: carriesHandoff && !confBool('codexHandoffNetwork', false) ? false : null });
   const cwd = existsSync(st.cwd) ? st.cwd : DEFAULT_CWD;
   const resumed = Boolean(st.codexThreadId);
   const imgs = (images || []).filter(isCodexImage);
@@ -5166,7 +5257,7 @@ function flushParkedCodexChats() {
   // One line for the owner BEFORE the dispatch, same rule as the dead-worker path:
   // without it the flush is a bubble with no cause, the assistant thinking about nothing
   // minutes after the last thing either of them said.
-  send(codexCatchUpLine(items.length), { markdown: false }).catch(() => {});
+  send(codexCatchUpLine(items.length, { name: BRIDGE_NAME }), { markdown: false }).catch(() => {});
   dispatchPrompt(codexParkedNote({ ownerName: OWNER_NAME, items }), LANES.main, { priority: true });
 }
 
@@ -5243,6 +5334,7 @@ function drainBgHandoff() {
       // record of it anywhere.
       const run = runCodex(text, {
         mode: 'edit', // a handed-off job is work, not a question
+        announce: false, // the handoff notice below IS this run's announcement
         cwd: codexCwd,
         reason: decision.reason,
         pausedUntil: decision.pausedUntil,

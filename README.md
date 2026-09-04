@@ -671,8 +671,12 @@ Renaming those would break every existing install, so they migrate in a later
 release with an upgrade path. Nothing you have configured needs to change today.
 
 **`config.json` options:** `model`, `effort` (empty = your CLI defaults),
-`defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `timeoutMs` (chat lane, default
-30 min), `bgTimeoutMs` (background workers, default 8h — that lane is for
+`defaultCwd`, `claudeBin`, `yolo`, `ownerName`, `ownerTz` (IANA zone for the
+reset clocks on `/account`, `/usage` and `/status` — empty means this machine's
+own zone, which is only wrong if you read Leash from somewhere else),
+`openaiApiKey` (voice-note transcription; usually better as `$OPENAI_API_KEY`),
+`logFile` (empty = the service manager's own log path), `timeoutMs` (chat lane,
+default 30 min), `bgTimeoutMs` (background workers, default 8h — that lane is for
 hour-scale jobs), `staleSec` (skip messages older than this — default 1h, so a
 sleeping laptop doesn't wake to a backlog), plus the detached-worker tunables
 `bgTailMs` (how often a worker's log is polled, default 300ms), `reattachPollMs`
@@ -692,7 +696,10 @@ both engines, leaving code, fences and URLs alone — default `false`, the model
 keeps its own voice) and `progress` (`{"background": false}` turns off the live
 line a background worker keeps on screen from dispatch to done — default `true`).
 
-Every key can be overridden with a `BRIDGE_<UPPER_SNAKE>` environment variable.
+Every key can be overridden with a `BRIDGE_<UPPER_SNAKE>` environment variable,
+including the object-valued ones: `BRIDGE_STYLE='{"noDashes":true}'`,
+`BRIDGE_PROGRESS='{"background":false}'`, `BRIDGE_ENGINE=codex` (or the same JSON
+object). Booleans take `true`/`false`, `1`/`0` or `yes`/`no`.
 
 **Background workers outlive the daemon.** A background job is spawned
 *detached*, in its own process group, with stdout/stderr going to a file in

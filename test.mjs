@@ -214,6 +214,75 @@ t('disposable progress edits never retry into a 429', () => {
 });
 
 
+
+// ---------- merge tripwires (source-level) ----------
+// This class of defect is why they exist: this file is ported from a private
+// sibling by 3-way merge, and twice a merge took a function's SIGNATURE from one
+// side and its BODY from the other. Neither `node --check` nor any unit suite
+// sees it, because both halves parse and the functions carrying the damage
+// (runClaude, reportBgOutcome) are not among the symbols the wiring suites
+// extract. These three checks are cheap, deterministic, and would have caught
+// both of them.
+
+t('every top-level function has at least one caller', () => {
+  // A function the merge orphaned is a feature that silently stopped happening.
+  // notifyOwnerBgFinished lost both call sites this way, which turned a FAILED
+  // background worker into a green tick.
+  const declared = [...src.matchAll(/^(?:async )?function ([A-Za-z_$][\w$]*)/gm)].map((m) => m[1]);
+  const orphans = declared.filter((name) => {
+    // The declaration line itself is not a call site.
+    const uses = src.split('\n').filter((l) => new RegExp(`\\b${name}\\b`).test(l) && !new RegExp(`^(?:async )?function ${name}\\b`).test(l));
+    return uses.length === 0;
+  });
+  ok(orphans.length === 0, `declared but never called: ${orphans.join(', ')}`);
+});
+
+t('handBackToChat is always called with its run id', () => {
+  // The report file is named from that id. Passing the steers array in its slot
+  // wrote every report to one hidden file, and dropping it entirely was a
+  // ReferenceError on the main background path.
+  const calls = [...src.matchAll(/handBackToChat\(([\s\S]{0,400}?)\);/g)]
+    .map((m) => m[1])
+    .filter((args) => !/^\s*task, output, status/.test(args)); // the declaration
+  ok(calls.length >= 3, `expected the handback to have call sites, found ${calls.length}`);
+  for (const args of calls) {
+    // Split on TOP-LEVEL commas only: the options object and any inline array
+    // are nested, and splitting naively would read one of their commas as an
+    // argument boundary.
+    const parts = [];
+    let depth = 0;
+    let cur = '';
+    for (const ch of args) {
+      if ('([{'.includes(ch)) depth++;
+      else if (')]}'.includes(ch)) depth--;
+      if (ch === ',' && depth === 0) {
+        parts.push(cur);
+        cur = '';
+      } else cur += ch;
+    }
+    parts.push(cur);
+    ok(parts.length >= 4, `handBackToChat called with ${parts.length} arguments, needs at least 4: ${args.slice(0, 120)}`);
+    // And the fourth one has to BE an id. Passing `steers` here is the exact
+    // shape of the bug: bgReportId([]) is the empty string, so every report
+    // landed in one hidden file and the steer record was thrown away.
+    const fourth = parts[3].trim();
+    ok(
+      /^(id|runId|[A-Za-z_$][\w$]*[Ii]d)$/.test(fourth) || fourth.startsWith('bgReportId('),
+      `handBackToChat's 4th argument must be the run id, got \`${fourth}\`: ${args.slice(0, 120)}`,
+    );
+  }
+});
+
+t('the report id is resolved once per outcome funnel', () => {
+  // The durable row in bg-results.jsonl and the file on disk must name the SAME
+  // report, so both funnels bind it before they use it.
+  for (const fn of ['reportBgOutcome', 'reportCodexOutcome']) {
+    const body = grab(fn);
+    ok(/const id = bgReportId\(runId\);/.test(body), `${fn} does not resolve its report id`);
+    ok(!/\bid\b/.test(body.split('\n')[0]), `${fn} should take runId, not id`);
+  }
+});
+
 // ---------- the outbound funnel: what actually reaches Telegram ----------
 // The unit suites prove the RENDERERS. This proves the WIRING: sendRich and
 // sendResult are pulled out of bridge.mjs BY SOURCE (importing it would boot a

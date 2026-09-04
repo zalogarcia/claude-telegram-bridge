@@ -251,7 +251,7 @@ t('dead worker: what he sees, and the one edit it becomes', () => {
   eq(deadWorkerLine(args), '⚠️ bg2 died after 41m\nFix the engine-switch message\nChecking what survived…');
   eq(
     deadWorkerLine({ ...args, phase: 'salvaging' }),
-    '⚠️ bg2 died after 41m\nFix the engine-switch message\nM is going through the salvage now.',
+    '⚠️ bg2 died after 41m\nFix the engine-switch message\nLeash is going through the salvage now.',
   );
   houseStyle(deadWorkerLine(args), 'deadWorkerLine');
 });
@@ -279,8 +279,8 @@ t('chain paused: two lines, and the second one is the reassurance', () => {
 });
 
 t('codex catch-up: the cause of a bubble he did not ask for', () => {
-  eq(codexCatchUpLine(3), '▶️ Claude is back\n🧠 Catching M up on 3 Codex answers');
-  eq(codexCatchUpLine(1), '▶️ Claude is back\n🧠 Catching M up on 1 Codex answer');
+  eq(codexCatchUpLine(3), '▶️ Claude is back\n🧠 Catching Leash up on 3 Codex answers');
+  eq(codexCatchUpLine(1), '▶️ Claude is back\n🧠 Catching Leash up on 1 Codex answer');
   houseStyle(codexCatchUpLine(3), 'codexCatchUpLine');
 });
 

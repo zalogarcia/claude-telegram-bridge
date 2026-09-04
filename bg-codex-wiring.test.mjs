@@ -1155,6 +1155,17 @@ export let CODEX_SETTINGS = { model: null, effort: null };
 export const setCodexSettings = (v) => { CODEX_SETTINGS = v; };
 const codexSettingsNow = () => CODEX_SETTINGS;
 const conf = (key, fallback) => (key in CONF ? CONF[key] : fallback);
+// conf() can hand back a string (the environment layer), so the real code reads
+// its booleans through confBool. Same coercion here, or an extracted function
+// would call an undefined name.
+const confBool = (k, f) => {
+  const v = conf(k, f);
+  if (typeof v !== 'string') return Boolean(v);
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
+  return Boolean(f);
+};
 export const CONF = {};
 const codexChatBox = ({ network = null } = {}) =>
   codexChatSandbox({ yolo: STATE.yolo !== false, network: network === false ? false : STATE.codexNetwork !== false });
@@ -2129,6 +2140,17 @@ export const setAvail = (o = {}) => {
 };
 export let CONF = {};
 const conf = (k, f) => (k in CONF ? CONF[k] : f);
+// conf() can hand back a string (the environment layer), so the real code reads
+// its booleans through confBool. Same coercion here, or the extracted
+// switchHandoff would call an undefined function.
+const confBool = (k, f) => {
+  const v = conf(k, f);
+  if (typeof v !== 'string') return Boolean(v);
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
+  return Boolean(f);
+};
 const codexAccount = { peek: () => ({ identity: { state: 'chatgpt' } }) };
 const codexChatBox = () => ({ sandbox: 'workspace-write', network: true });
 export const reset = () => {
@@ -2920,6 +2942,17 @@ const CODEX_MODEL = null;
 const DEFAULT_CWD = ${JSON.stringify(TMP)};
 const CONF = {};
 const conf = (key, fallback) => (key in CONF ? CONF[key] : fallback);
+// conf() can hand back a string (the environment layer), so the real code reads
+// its booleans through confBool. Same coercion here, or an extracted function
+// would call an undefined name.
+const confBool = (k, f) => {
+  const v = conf(k, f);
+  if (typeof v !== 'string') return Boolean(v);
+  const s = v.trim().toLowerCase();
+  if (s === 'true' || s === '1' || s === 'yes') return true;
+  if (s === 'false' || s === '0' || s === 'no' || s === '') return false;
+  return Boolean(f);
+};
 export const setConf = (k, v) => { CONF[k] = v; };
 const codexSettingsNow = () => ({ model: null, effort: null });
 const codexChatBox = ({ network = null } = {}) =>
