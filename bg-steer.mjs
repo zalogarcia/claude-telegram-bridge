@@ -201,7 +201,11 @@ export function resolveSteerTarget(target, workers) {
     // The two ways this happens: the worker outlived a previous daemon (we
     // re-attached to its log but hold no stdin pipe to it), or its result event
     // is already in and its stdin has been closed to let it exit.
-    return fail(REASONS.NOT_STEERABLE, { runId: hit.runId, lane: hit.lane, pid: hit.pid, worker: hit });
+    // `engine` rides along so the refusal can say WHY rather than just no: a
+    // Codex run is not a Claude worker that happens to be closed, it is a
+    // process with no stdin to write into at all, and the answer to "then how
+    // do I redirect it" is different for each.
+    return fail(REASONS.NOT_STEERABLE, { runId: hit.runId, lane: hit.lane, pid: hit.pid, engine: hit.engine || 'claude', worker: hit });
   }
   return { ok: true, worker: hit };
 }
@@ -221,7 +225,31 @@ function hhmmss(iso) {
   return m ? `${m[1]}Z` : String(iso ?? '');
 }
 
-export function steerAckLine(res) {
+// The same second in the reader's own timezone, for the phone form. Degrades to
+// the UTC one rather than throwing on a malformed stamp.
+function hhmmssLocal(iso, timeZone) {
+  const d = new Date(String(iso ?? ''));
+  if (Number.isNaN(d.getTime())) return hhmmss(iso);
+  try {
+    return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false, timeZone });
+  } catch {
+    return hhmmss(iso);
+  }
+}
+
+/**
+ * TWO AUDIENCES, ONE RESOLVER.
+ *
+ * This line is shared by `bg.mjs steer` (read in a terminal, where a run id and
+ * a pid are exactly what you compare against the run log) and `/steer` (read on
+ * a phone, where a 160-character continuation line is a paragraph). The terminal
+ * form is right for a terminal and wrong for a phone, so `verbose` picks.
+ *
+ * `verbose: true` is the default and is byte-for-byte what the CLI has always
+ * printed: nothing about the terminal output changes.
+ */
+export function steerAckLine(res, { verbose = true, timeZone = null } = {}) {
+  if (!verbose) return phoneAckLine(res, { timeZone });
   if (res?.ok) {
     return `steered into ${res.lane || '?'} (${res.runId || '?'}, pid ${res.pid ?? '?'}) at ${hhmmss(res.deliveredAt)}`;
   }
@@ -231,7 +259,63 @@ export function steerAckLine(res) {
   // one I meant?
   const who = res?.runId ? ` (${res.runId}${res.lane ? `, lane ${res.lane}` : ''}${res.pid ? `, pid ${res.pid}` : ''})` : '';
   const extra = res?.candidates?.length ? ` (candidates: ${res.candidates.join(', ')})` : res?.detail ? ` (${res.detail})` : '';
-  return `NOT delivered: ${reason}${who}${extra}`;
+  // A CODEX run is refused for a structural reason, not a timing one, and the
+  // generic line read as "try again in a second". README.md has promised this
+  // wording since the second engine landed; now it exists. The escape hatch
+  // matters more than the refusal: a Codex job is re-fired, not redirected.
+  const why =
+    reason === REASONS.NOT_STEERABLE && res?.engine === 'codex'
+      ? '\n  Codex runs take no mid-run input: the run is file-backed with no stdin to write into.'
+        + '\n  Re-fire it instead: bg.mjs --engine codex --file <brief>. On the chat lane, send the text as the next message and the thread keeps its context.'
+      : '';
+  return `NOT delivered: ${reason}${who}${extra}${why}`;
+}
+
+/**
+ * The phone half. Same facts, ordered for a 40-character line: what happened,
+ * then who, then what to do instead.
+ *
+ * The run id and the pid are deliberately gone. They are unreadable and
+ * untypeable on a phone, and the thing he would do with them, steer again, is
+ * `/steer <lane>`. `bg.mjs ps` still prints both.
+ */
+function phoneAckLine(res, { timeZone = null } = {}) {
+  if (res?.ok) {
+    // HIS clock, not UTC. The CLI form ends in Z because you compare it against
+    // a run log; on a phone an unlabelled UTC time would simply be wrong by
+    // four hours, and a labelled one is noise.
+    const at = timeZone ? hhmmssLocal(res.deliveredAt, timeZone) : hhmmss(res.deliveredAt);
+    return `➡️ Steered into ${res.lane || 'the worker'}${at ? ` · ${at}` : ''}`;
+  }
+  const reason = res?.reason || 'unknown';
+  if (reason === REASONS.AMBIGUOUS) {
+    return ['❌ Not delivered · which worker?', `Candidates: ${(res.candidates || []).join(', ') || 'several'}`].join('\n');
+  }
+  if (reason === REASONS.NOT_STEERABLE) {
+    // A Codex run is refused for a STRUCTURAL reason, not a timing one, and the
+    // generic line read as "try again in a second". The escape hatch matters
+    // more than the refusal: a Codex job is re-fired, not redirected.
+    if (res?.engine === 'codex') {
+      return [
+        `❌ Not delivered · ${res.lane || 'that run'} takes no mid-run input`,
+        '🧠 A Codex run is file-backed, no stdin.',
+        'Re-fire it instead, or send it as the next',
+        'message so the thread keeps its context.',
+      ].join('\n');
+    }
+    return [
+      `❌ Not delivered · ${res.lane || 'that worker'} cannot take one`,
+      'It survived a restart, or it has finished.',
+    ].join('\n');
+  }
+  if (reason === REASONS.NO_MATCH) {
+    return ['❌ Not delivered · no worker matches', '/status lists what is running.'].join('\n');
+  }
+  if (reason === REASONS.WRITE_FAILED) {
+    return [`❌ Not delivered · ${res.lane || 'the worker'} did not take it`, 'It probably exited as it was written to.'].join('\n');
+  }
+  const detail = res?.detail ? `\n${String(res.detail).slice(0, 80)}` : '';
+  return `❌ Not delivered · ${reason}${detail}`;
 }
 
 export function steerResponse(worker, deliveredAt) {
@@ -242,6 +326,10 @@ export function steerResponse(worker, deliveredAt) {
     pid: worker?.pid ?? null,
     deliveredAt: deliveredAt || new Date().toISOString(),
   };
+  // `ack` is the TERMINAL rendering and it stays on the wire, because the CLI
+  // is dependency-free and cannot import this file: the daemon renders, bg.mjs
+  // prints. The phone rendering is built at its own call site instead, which is
+  // the only place that knows the owner's timezone.
   return { ...res, ack: steerAckLine(res) };
 }
 

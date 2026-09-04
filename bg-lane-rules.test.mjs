@@ -22,7 +22,7 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TASK_ANCHOR, briefRepo, briefTitle, stripLaneRules } from './bg-lane-rules.mjs';
+import { TASK_ANCHOR, TITLE_MAX, briefRepo, briefTitle, stripLaneRules } from './bg-lane-rules.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const TMP = mkdtempSync(path.join(tmpdir(), 'bg-lane-rules-'));
@@ -209,12 +209,14 @@ t('briefTitle skips blank lines and collapses whitespace', () => {
 
 t('briefTitle clips long titles with an ellipsis', () => {
   const title = briefTitle('x'.repeat(200));
-  eq(title.length, 70);
+  eq(title.length, TITLE_MAX);
   ok(title.endsWith('…'));
 });
 
-t('briefTitle says something rather than nothing for an empty brief', () => {
-  eq(briefTitle(''), '(no description)');
+t('briefTitle is empty for an empty brief, so a renderer can omit the line', () => {
+  eq(briefTitle(''), '');
+  eq(briefTitle('\n\n   \n'), '');
+  eq(briefTitle(null), '');
 });
 
 // ---------------------------------------------------------------------------

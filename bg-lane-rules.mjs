@@ -40,25 +40,55 @@ export function stripLaneRules(text) {
   if (!s.startsWith(LANE_RULES_PREFIX)) return s;
   const i = s.indexOf(TASK_ANCHOR);
   if (i === -1) return s; // a header with no anchor: show it rather than eat the job
-  return s.slice(i + TASK_ANCHOR.length).replace(/^\s+/, '');
+  const rest = s.slice(i + TASK_ANCHOR.length).replace(/^\s+/, '');
+  return rest || s; // anchor present but nothing after it: same rule
 }
+
+// Roughly two phone lines. Long enough for a real headline, short enough that
+// the lane name and elapsed time on the same row are never pushed off-screen.
+export const TITLE_MAX = 90;
+
+// First ATX heading of the given level, hashes and any closing hashes stripped.
+function atxHeading(lines, level) {
+  const re = new RegExp(`^#{${level}}\\s+(.+?)\\s*#*\\s*$`);
+  for (const raw of lines) {
+    const m = re.exec(raw.trim());
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return null;
+}
+
+const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
+const clipTo = (s, max) => (s.length <= max ? s : `${s.slice(0, Math.max(0, max - 1))}\u2026`);
 
 /**
  * One line naming the job, for a status row or a worker table.
  *
- * The first non-empty line of the stripped brief, whitespace collapsed and
- * clipped. A brief's first line is its subject far more often than its first N
- * characters are, which is what makes this better than clipping the raw prompt:
- * a markdown brief opens with `# TASK: port the thing`, and that IS the title.
+ * The preamble comes off first, so this is safe on a raw queued brief. After
+ * that, precedence:
+ *   1. the first `# ` heading (or `## ` if the brief has no `# `), hashes off.
+ *      A brief handed over with --file is markdown and its author wrote that
+ *      heading AS the one-line summary, which beats any character clip;
+ *   2. otherwise the first non-empty line;
+ *   3. otherwise, when that line overflows, its first sentence if it fits.
+ *
+ * Empty in, empty out: a renderer that wants a placeholder supplies its own,
+ * and workerLine deliberately omits a line it cannot fill.
  */
-export function briefTitle(text, max = 70) {
-  const body = stripLaneRules(text)
-    .split('\n')
-    .map((l) => l.replace(/^\s*#+\s*/, '').trim())
-    .find((l) => l.length > 0);
-  const one = String(body ?? '').replace(/\s+/g, ' ').trim();
-  if (!one) return '(no description)';
-  return one.length <= max ? one : `${one.slice(0, Math.max(0, max - 1))}…`;
+export function briefTitle(text, max = TITLE_MAX) {
+  const lines = stripLaneRules(text).split('\n');
+  const heading = atxHeading(lines, 1) || atxHeading(lines, 2);
+  if (heading) return clipTo(oneLine(heading), max);
+
+  const first = lines.map(oneLine).find((l) => l.length > 0);
+  if (!first) return '';
+  if (first.length <= max) return first;
+
+  // One long unbroken line (an argv one-liner, a paragraph). A sentence break
+  // is a better cut than a word break when one lands inside the budget.
+  const sentence = /^(.+?[.!?])(?:\s|$)/.exec(first)?.[1];
+  if (sentence && sentence.length <= max) return sentence;
+  return clipTo(first, max);
 }
 
 // How far into a brief to look for its repo. Far enough to clear a title, a

@@ -624,6 +624,116 @@ await at('ps against a cold socket also exits 2, never a fake empty list', async
 stub.close();
 rmSync(TMP, { recursive: true, force: true });
 
+// ---------------------------------------------------------------------------
+console.log('\nX. refusing to steer a Codex run');
+// ---------------------------------------------------------------------------
+
+t('★ case 29: a Codex run says WHY it cannot be steered, and what to do instead', () => {
+  // README.md has promised this wording since the second engine landed; the
+  // code answered with the generic `not_steerable`, which reads as "try again
+  // in a second" for what is a structural fact: the run is file-backed with no
+  // stdin to write into.
+  const codexRun = { runId: 'codex-1788000000000', watchdogId: 'codex-1788000000000-42', lane: 'codex', pid: 42, isBg: true, running: true, steerable: false, engine: 'codex', startedAt: 1788000000000 };
+  const res = resolveSteerTarget('codex-1788000000000', [codexRun]);
+  eq(res.ok, false);
+  eq(res.engine, 'codex', 'the engine has to reach the ack or it cannot say anything specific');
+  const ack = steerAckLine(res);
+  ok(/take no mid-run input/.test(ack), ack);
+  ok(/--engine codex --file/.test(ack), `the refusal has no escape hatch: ${ack}`);
+  ok(/codex-1788000000000/.test(ack), 'it still names the worker it refused');
+});
+
+t('a CLAUDE worker that cannot be steered keeps the short answer', () => {
+  // Its reason is timing (the result is in, stdin is closed), not structure, so
+  // the Codex paragraph would be wrong advice.
+  const claudeRun = { runId: 'bg-1788000000000', lane: 'bg', pid: 43, isBg: true, running: true, steerable: false, startedAt: 1788000000000 };
+  const ack = steerAckLine(resolveSteerTarget('bg', [claudeRun]));
+  ok(/not_steerable/.test(ack), ack);
+  ok(!/mid-run input/.test(ack), ack);
+});
+
+// ---------------------------------------------------------------------------
+// THE TWO AUDIENCES. steerAckLine is read in a terminal by `bg.mjs steer` and
+// on a phone by /steer, and the terminal form is wrong on a phone: a run id, a
+// pid, and two continuation lines of 130 and 160 characters.
+// ---------------------------------------------------------------------------
+
+t('the CLI line is unchanged, byte for byte', () => {
+  const res = steerResponse({ runId: 'bg2-1788453512237', lane: 'bg2', pid: 4123 }, '2026-09-04T17:02:11.500Z');
+  eq(res.ack, 'steered into bg2 (bg2-1788453512237, pid 4123) at 17:02:11Z', 'the terminal output must not move');
+  eq(steerAckLine(res), res.ack, 'verbose is the default, so every existing caller is untouched');
+});
+
+t('the phone line drops what a phone cannot read or type', () => {
+  const res = steerResponse({ runId: 'bg2-1788453512237', lane: 'bg2', pid: 4123 }, '2026-09-04T17:02:11.500Z');
+  const phone = steerAckLine(res, { verbose: false });
+  eq(phone, '➡️ Steered into bg2 · 17:02:11Z', 'with no timezone it stays honestly UTC');
+  ok(!phone.includes('1788453512237'), 'an unreadable, untypeable run id');
+  ok(!phone.includes('4123'), 'and a pid he would do nothing with');
+  for (const line of phone.split('\n')) ok(line.length <= 44, `${line.length} chars: ${line}`);
+});
+
+t('★ given a timezone, the phone line is the OWNER\'s clock, not UTC', () => {
+  const res = steerResponse({ runId: 'bg2-1', lane: 'bg2', pid: 1 }, '2026-09-04T21:02:11.500Z');
+  eq(
+    steerAckLine(res, { verbose: false, timeZone: 'Europe/Lisbon' }),
+    '➡️ Steered into bg2 · 22:02:11',
+    'an unlabelled UTC time on a phone in another zone is simply wrong',
+  );
+  eq(
+    steerAckLine(res, { verbose: false, timeZone: 'Not/AZone' }),
+    '➡️ Steered into bg2 · 21:02:11Z',
+    'a bad zone degrades to the UTC form rather than throwing inside an ack',
+  );
+});
+
+t('a Codex refusal says it is structural, and how to redirect anyway', () => {
+  const res = steerFailure(REASONS.NOT_STEERABLE, { runId: 'codex-1788', lane: 'codex', pid: 41, engine: 'codex' });
+  const phone = steerAckLine(res, { verbose: false });
+  const lines = phone.split('\n');
+  eq(lines[0], '❌ Not delivered · codex takes no mid-run input');
+  ok(phone.includes('Re-fire it'), 'the escape hatch matters more than the refusal');
+  for (const line of lines.slice(1)) ok(line.length <= 44, `${line.length} chars: ${line}`);
+  ok(res.ack.startsWith('NOT delivered: not_steerable'), 'and the CLI form is untouched');
+});
+
+t('an ambiguous target asks the question instead of naming a reason code', () => {
+  const res = steerFailure(REASONS.AMBIGUOUS, { candidates: ['bg2', 'bg3'] });
+  eq(steerAckLine(res, { verbose: false }), '❌ Not delivered · which worker?\nCandidates: bg2, bg3');
+});
+
+t('a Claude worker that cannot take one says which of the two reasons it is', () => {
+  const phone = steerAckLine(steerFailure(REASONS.NOT_STEERABLE, { lane: 'bg3', runId: 'bg3-1', pid: 9 }), { verbose: false });
+  ok(phone.includes('bg3 cannot take one'), phone);
+  ok(/restart|finished/.test(phone), 'a bare refusal reads as "try again in a second"');
+});
+
+t('no match, and a write that lost the race, both say what to do next', () => {
+  ok(steerAckLine(steerFailure(REASONS.NO_MATCH), { verbose: false }).includes('/status'), 'name the command that lists them');
+  ok(steerAckLine(steerFailure(REASONS.WRITE_FAILED, { lane: 'bg2' }), { verbose: false }).includes('exited'), 'the likely cause');
+});
+
+t('an unknown reason still renders rather than printing "undefined"', () => {
+  const phone = steerAckLine(steerFailure('some_future_reason', { detail: 'x'.repeat(300) }), { verbose: false });
+  ok(phone.startsWith('❌ Not delivered · some_future_reason'));
+  ok(phone.length < 160, 'and the detail is bounded');
+});
+
+t('no phone ack contains an em dash', () => {
+  const all = [
+    steerResponse({ lane: 'bg2', runId: 'bg2-1', pid: 1 }, '2026-09-04T17:02:11Z'),
+    steerFailure(REASONS.AMBIGUOUS, { candidates: ['a', 'b'] }),
+    steerFailure(REASONS.NOT_STEERABLE, { lane: 'x', engine: 'codex' }),
+    steerFailure(REASONS.NOT_STEERABLE, { lane: 'x' }),
+    steerFailure(REASONS.NO_MATCH),
+    steerFailure(REASONS.WRITE_FAILED, { lane: 'x' }),
+  ];
+  for (const r of all) {
+    const phone = steerAckLine(r, { verbose: false });
+    ok(!/[–—]/.test(phone), phone);
+  }
+});
+
 console.log(`\n${pass} passed, ${failures.length} failed\n`);
 if (failures.length) {
   for (const f of failures) console.error(`  ✗ ${f}\n`);
