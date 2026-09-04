@@ -52,7 +52,7 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 | 🎙️ **Voice notes** | Talk instead of typing. Transcribed with Whisper, run as a prompt. |
 | 📎 **Files & photos** | Send a screenshot with "why does this look broken?" — images, PDFs, code, anything ≤20MB. |
 | ⏰ **Reminders & cron** | "Remind me at 8" or "every morning summarize yesterday's commits" — the second one actually runs. |
-| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap — and when the active account is rate limited, Leash rotates background work to one that isn't. [Details.](docs/multi-account.md) |
+| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap — and when the active account is rate limited, Leash swaps to the next one and retries your message, chat and background alike. |
 | 🩺 **Self-healing** | KeepAlive restarts crashes; a two-strike watchdog catches wedges and tells you it did. |
 | 🎛️ **Full CLI access** | Your custom slash commands work. Switch models mid-conversation. Check usage. |
 
@@ -201,9 +201,10 @@ One-time setup, once per account:
 
 After that: `/account` shows every enrolled account with its live headroom and
 one-tap swap buttons; `/account <name>` swaps by text; `/usage` is the full
-per-account usage view; and when a background worker dies on a session limit,
-Leash marks that account limited and rotates new work to the
-least-recently-used account that still has headroom. Workers already running are
+per-account usage view; and when a run dies on a session limit, a chat message or a
+background worker alike, Leash marks that account limited, rotates to the
+least-recently-used account that still has headroom, and retries a chat
+message once on it. Workers already running are
 never killed by a swap — only new ones pick up the new account.
 
 **Credentials never leave your machine.** Enrolled accounts live in

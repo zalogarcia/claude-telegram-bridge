@@ -59,8 +59,8 @@ has no captured credentials.
 
 ## Automatic rotation
 
-When a **background worker** dies and its failure output carries a session-limit
-message, Leash:
+When a run dies with a session-limit message in its failure output, whether it
+is a **chat message** or a **background worker**, Leash:
 
 1. marks the active account limited until the reset time parsed from the
    message (or a stated one-hour guess if it can't be parsed),
