@@ -100,9 +100,10 @@ billing that has nothing to do with Anthropic. While the pause is in effect:
   context, with an explicit instruction not to answer them a second time.
 
 The two engines are deliberately isolated from each other: a Codex failure can
-never mark a Claude account limited, swap one, or re-fire anything on Claude,
-and the Claude rotation above never spawns Codex. That is what stops a failing
-job bouncing between them.
+never mark a Claude account limited, swap one, or re-fire anything on Claude.
+The Claude rotation above retries a chat message once on the next account;
+only when every account is walled does it hand that one message to Codex, and
+nothing bounces back. That is what stops a failing job bouncing between them.
 
 `/codex off` disables the automatic half (on-demand `/codex` still works);
 `/codex on` re-enables it; `/account` shows the Codex login, its own two

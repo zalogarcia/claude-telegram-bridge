@@ -339,9 +339,12 @@ the chat's directory rather than being guessed at.
 
 `/codex off` turns that half off; on-demand `/codex` still works.
 
-The two engines never wake each other: a Codex failure can never mark a Claude
-account limited, swap one, or re-fire anything on Claude, and Claude's own
-limit handling never spawns Codex. That is what stops the fallback looping.
+The two engines never chase each other: a Codex failure can never mark a Claude
+account limited, swap one, or re-fire anything on Claude. Claude's own limit
+handling rotates to the next account and retries your message once; only when
+every Claude account is walled does it hand that one message to Codex, and a
+Codex failure on that message ends there. That is what stops the fallback
+looping.
 
 **Billing.** Codex bills *your own* OpenAI login (a ChatGPT subscription or an
 API key, whichever `codex login` set up), and nothing about it touches your
