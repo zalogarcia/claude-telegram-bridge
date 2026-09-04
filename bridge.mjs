@@ -120,6 +120,8 @@ import {
   limitWallLine,
   limitWallResolved,
   swapFailedLine,
+  chatRotatedLine,
+  chatWalledRetryLine,
   bothWalledLine,
   enginesBackLine,
 } from './system-messages.mjs';
@@ -1179,7 +1181,15 @@ function editWorkerNotice(runId, patch, { keepAlive = false } = {}) {
  * of it. Empty on every other path, which is all of them but the first message
  * after a switch.
  */
-function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}) {
+// `images`, `priority` and `retried` are not used to START the run: they are
+// carried so that a run which dies on a session limit can be re-dispatched as
+// the same message. Before they were threaded through, the chat lane's close
+// handler had the failure in hand and no way to say what it was a failure OF.
+function runClaude(
+  rawText,
+  lane = LANES.main,
+  { prepend = '', kinds = [], images = [], priority = false, retried = false } = {},
+) {
   const st = chatState();
   const text = prepend ? `${prepend}\n\n${rawText}` : rawText;
   // Claim the busy slot synchronously — before any await — so two messages
@@ -1644,9 +1654,50 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
       } // end ctxKey gauge
       saveState();
 
+      // A SESSION LIMIT ON THE CHAT LANE. Decided HERE, above the progress
+      // settle, because the answer to "what happened to my message" belongs in
+      // the bubble they are already watching. Until this existed it said
+      // "❌ Error · 5s" with two free accounts sitting in the store, twice in
+      // two minutes, and the account was rotated by hand.
+      //
+      // WHICH CHANNEL THE DEATH ARRIVES ON, measured rather than assumed. The
+      // CLI reports a session limit as a RESULT EVENT carrying `is_error: true`
+      // and `subtype: "success"`, with the phrase in `result` and stderr empty:
+      // 15 of the 15 captured limit deaths in runs/*.jsonl have exactly that
+      // shape, and 0 of them put anything on stderr (they ship as
+      // fixtures/limit-deaths.jsonl, since runs/ is gitignored). A first cut of
+      // this guard read stderr and `!resultTexts.length` and therefore fired on
+      // none of them, which is also why the death used to reach the phone as if
+      // it were an ANSWER (the `resultTexts.length` arm below) rather than as a
+      // failure.
+      //
+      // THE EVENT'S OWN FLAGS ARE THE DISCRIMINATOR, exactly as
+      // detached-workers.mjs's bgOutcome has read them on the worker path all
+      // along. That is what keeps a normal answer QUOTING the phrase out (a
+      // usage audit is wall to wall with it): a successful turn carries
+      // is_error false, so it can never reach isLimitSignal from here.
+      const eventErrored = resultEventErrored(resultEvent);
+      const chatFailureDetail =
+        !wasStopped && lane === LANES.main ? chatRunFailure(resultTexts, resultEvent, code, stderrTail) : null;
+      const limitPlan = chatFailureDetail
+        ? await handleChatLimitFailure(chatFailureDetail, {
+            text: rawText,
+            lane,
+            images,
+            kinds,
+            prepend,
+            priority,
+            retried,
+          })
+        : null;
+
       // Final progress-message state: header + tool activity only — the answer
       // itself goes out as its own message below, so repeating it here duplicates.
-      if (progressMsgId != null) {
+      if (progressMsgId != null && limitPlan?.line) {
+        // The whole bubble, not a header plus a tool tail: the steps that ran
+        // before the wall are not what this message is about any more.
+        await editProgress(progressMsgId, escHtml(limitPlan.line), () => limitPlan.line).catch(() => {});
+      } else if (progressMsgId != null) {
         const head = wasStopped ? '🛑 Stopped' : resultEvent && !resultEvent.is_error ? '✅ Done' : '❌ Error';
         const steps = toolLines.length;
         const meta = `${fmtElapsed(elapsed)}${steps ? ` · ${steps} step${steps > 1 ? 's' : ''}` : ''}`;
@@ -1666,7 +1717,15 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
       // climbing forever. A stranded live entry does not just look wrong: it
       // edits every 2.5s sweep for the life of the daemon and arms the SHARED
       // editCooldownUntil, degrading every other live line in the process.
-      if (isCompact && !resultTexts.length) {
+      //
+      // `|| eventErrored` because a compaction that dies on a session limit
+      // does have text: the CLI's death message. Without it that text was
+      // COMMITTED as the summary, so the old session id was deleted and a
+      // fresh chat was primed with "You've hit your session limit" as its
+      // entire carried-over context, under a ✅ Compacted. Found by the QA
+      // pass on this change; the guard on the two commit arms below is the
+      // other half.
+      if (isCompact && (!resultTexts.length || eventErrored)) {
         settleCompactNotice(
           wasStopped
             ? compactDiscardedLine()
@@ -1701,7 +1760,32 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
           logPath ? path.basename(logPath, '.jsonl') : null,
           { steers: run.steers },
         );
-      } else if (isCompact && resultTexts.length && !genOk) {
+      } else if (limitPlan) {
+        // A SESSION LIMIT DEATH. Hoisted above every arm below because the
+        // death arrives WITH text (the CLI puts its message in `result`), so
+        // `resultTexts.length` would otherwise claim it first and send it to
+        // the phone as though it were the assistant's answer, which is exactly
+        // what the screenshot showed. recordChatTurn is deliberately not
+        // reached either: a death is not an assistant turn, and storing it
+        // would carry it into the next engine handoff.
+        if (limitPlan.dispatch) {
+          // The rotation took the message over. The bubble above already says
+          // the limit was hit, which account is live now and that the message
+          // is being re-run: a second bubble repeating the first half and
+          // contradicting the second is what made this look unhandled.
+          limitPlan.dispatch();
+        } else {
+          // Rotated, but nothing to re-run it on (internal traffic, a swap
+          // that would not write, a wall with no Codex behind it). They get the
+          // ordinary failure, which is at least honest about being one.
+          await sendError({
+            title: 'Claude run failed',
+            detail: firstMeaningfulLine(chatFailureDetail),
+            remedy: claudeFailureRemedy(classifyClaudeFailure(chatFailureDetail)),
+            full: chatFailureDetail,
+          });
+        }
+      } else if (isCompact && resultTexts.length && !eventErrored && !genOk) {
         // /new or /resume landed while the summary was being written — the
         // branch below would act on the WRONG chat (delete the one the user
         // just switched to, resurrect the one they cleared). Discard instead;
@@ -1710,7 +1794,11 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
         if (!settleCompactNotice(compactDiscardedLine())) {
           await send(compactDiscardedLine(), { markdown: false }).catch(() => {});
         }
-      } else if (isCompact && resultTexts.length) {
+      } else if (isCompact && resultTexts.length && !eventErrored) {
+        // `!eventErrored`: the text has to be a SUMMARY, not the CLI reporting
+        // its own death. Committing a limit message as the summary deleted the
+        // live session id and primed a fresh chat with it, under a ✅.
+        //
         // /compact phase 2: the summary is in hand — archive the old chat,
         // start a fresh session primed with it. The summary itself is not
         // sent as a bubble (it would be a wall of text).
@@ -1740,6 +1828,9 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
         recordChatTurn({ engine: 'claude', role: 'assistant', text: resultTexts.join('\n'), paths: touched });
         for (const t of resultTexts) await sendResult(t).catch(() => {});
       } else if (resultEvent?.is_error || code !== 0) {
+        // A textless failure. `limitPlan` can never be set here (its own arm
+        // above claims every message it took over), so this stays the ordinary
+        // "Claude run failed" it always was.
         const detail = stderrTail.trim() || resultEvent?.subtype || `exit code ${code}`;
         await sendError({
           title: 'Claude run failed',
@@ -2444,80 +2535,194 @@ const QUEUE_MAX = 5;
 const PARKED_WALLED_MAX = QUEUE_MAX;
 const parkedWalledChats = [];
 
-async function handleLimitDeath(task, outcome, runId, steers = []) {
-  const detail = String(outcome.answer || '');
+/**
+ * Did this result EVENT report a failure, whatever text came with it?
+ *
+ * The same two flags detached-workers.mjs's bgOutcome has read on the worker
+ * path all along: `is_error`, or a subtype that is present and not "success"
+ * (an absent subtype is an older event shape, not an error).
+ */
+const resultEventErrored = (ev) =>
+  !!ev && (ev.is_error === true || (ev.subtype != null && ev.subtype !== 'success'));
+
+/**
+ * DID A CHAT-LANE RUN FAIL, AND WHAT DOES IT SAY? Returns the detail, or null.
+ *
+ * TEXT IS NOT PROOF OF SUCCESS, which is the whole point of this function. The
+ * CLI reports a session limit as a RESULT EVENT carrying `is_error: true` and
+ * `subtype: "success"`, with the message in `result` and stderr EMPTY: 15 of
+ * the 15 captured limit deaths under runs/ have exactly that shape and 0 of
+ * them put anything on stderr (they ship as fixtures/limit-deaths.jsonl). A
+ * death read off stderr alone is a death found on none of them, and it is also
+ * why one used to reach the phone as though it were the assistant's answer.
+ *
+ * The event's own flags are therefore the discriminator, and they are also what
+ * keeps a normal answer QUOTING the phrase out: a successful turn carries
+ * is_error false, so it never becomes a detail and never reaches isLimitSignal.
+ */
+function chatRunFailure(resultTexts, resultEvent, code, stderrTail = '') {
+  const texts = resultTexts || [];
+  const failed = texts.length ? resultEventErrored(resultEvent) : Boolean(resultEvent?.is_error) || code !== 0;
+  if (!failed) return null;
+  return texts.join('\n\n').trim() || String(stderrTail || '').trim() || resultEvent?.subtype || `exit code ${code}`;
+}
+
+// ---------------------------------------------------------------------------
+// ROTATING OFF A LIMITED ACCOUNT: one definition, two callers.
+//
+// This used to live INSIDE handleLimitDeath, whose only call site is a dead
+// background worker, so a session limit hit by the CHAT lane, on a message the
+// owner typed and was sitting there waiting on, marked nothing, swapped nothing
+// and raised no wall. It came back "❌ Error · 5s" with two other accounts free
+// (twice in two minutes) and the account was rotated by hand. The gap was never
+// a regression: the chat lane has never had a call site here.
+//
+// So the rotation is a function now rather than a block inside one caller's
+// handler. It owns the STATE (mark, cooldown, pause, swap, cache) and the wall
+// notice, which is the same object whoever provoked it; it deliberately does
+// NOT send the per-caller line, because the two callers say it differently: a
+// worker gets a bubble it can read later, the chat lane edits the bubble that
+// is already on screen owing an answer.
+//
+// Returns { outcome, activeName, nextName, error, reset, lines }:
+//   'no_claude'   nothing has a subject on this machine, nothing ran
+//   'paused'      the wall is already up; no account to move to
+//   'cooldown'    something else rotated seconds ago; the live account is fresh
+//   'swapped'     marked and moved; `nextName` is live from here
+//   'swap_failed' marked, but the credentials would not write
+//   'exhausted'   marked, nothing free, wall raised
+// `lines` is the worker-note prose, kept verbatim so the handback is unchanged.
+// ---------------------------------------------------------------------------
+async function rotateOffLimitedAccount(detail) {
   const now = Date.now();
   const lines = [];
-  const reset = parseResetTime(detail);
+  const reset = parseResetTime(String(detail || ''));
 
   // NO CLAUDE ON THIS MACHINE: there is no account to mark, none to swap to,
   // and pausing rotation would wall a Codex lane that never touched an
   // Anthropic account. Nothing here has a subject, so nothing here runs.
   if (!CLAUDE_AVAILABLE) {
     console.log('[bridge] limit death on a machine with no claude binary; rotation skipped');
-    return;
+    return { outcome: 'no_claude', activeName: null, nextName: null, error: null, reset, lines };
   }
 
   if (now < rotationPausedUntil) {
     lines.push(
       `ACCOUNT ROTATION: standing down. Every enrolled Claude account is rate limited until ${new Date(rotationPausedUntil).toLocaleString()}. Do NOT re-fire this job yet.`,
     );
-  } else if (now < rotationCooldownUntil) {
+    return { outcome: 'paused', activeName: null, nextName: null, error: null, reset, lines };
+  }
+  // THE DOUBLE-SWAP GUARD. One wall kills the chat lane and several workers
+  // inside a few seconds; without this each corpse would burn another account.
+  if (now < rotationCooldownUntil) {
     lines.push(
       `ACCOUNT ROTATION: already rotated moments ago for this same limit wall (cooldown). The account is live; this worker just died on the old one.`,
     );
+    return { outcome: 'cooldown', activeName: null, nextName: null, error: null, reset, lines };
+  }
+  // ARMED HERE, SYNCHRONOUSLY, not after the swap. Everything below this line
+  // is awaits: activeAccount, and a swapTo that shells out to the OS keychain
+  // for tens to hundreds of milliseconds. One wall kills the chat lane and a
+  // background worker within the same ~100ms, so with the guard armed only on
+  // success BOTH close handlers passed the check above and BOTH swapped, and
+  // the second one could read the already-swapped account as active and mark a
+  // healthy account limited. Rolled back below on the one outcome that leaves
+  // the store untouched.
+  const cooldownWas = rotationCooldownUntil;
+  rotationCooldownUntil = now + ROTATION_COOLDOWN_MS;
+
+  const active = await accounts.activeAccount();
+  const activeName = active?.account?.name || null;
+  if (activeName) {
+    accounts.markLimited(activeName, reset.resetsAt);
+    lines.push(
+      `ACCOUNT ROTATION: "${activeName}" hit its limit, reset ${fmtLeft(reset.resetsAt)} out${reset.guessed ? ' (GUESSED: the message did not carry a parseable reset time)' : ''}.`,
+    );
   } else {
-    const active = await accounts.activeAccount();
-    const activeName = active?.account?.name || null;
-    if (activeName) {
-      accounts.markLimited(activeName, reset.resetsAt);
-      lines.push(
-        `ACCOUNT ROTATION: "${activeName}" hit its limit, reset ${fmtLeft(reset.resetsAt)} out${reset.guessed ? ' (GUESSED: the message did not carry a parseable reset time)' : ''}.`,
-      );
-    } else {
-      lines.push(
-        `ACCOUNT ROTATION: a session limit was hit but the live credentials match no captured slot, so nothing could be marked limited. Run /account capture <name> to bank the current login.`,
-      );
+    lines.push(
+      `ACCOUNT ROTATION: a session limit was hit but the live credentials match no captured slot, so nothing could be marked limited. Run /account capture <name> to bank the current login.`,
+    );
+  }
+  const next = accounts.nextAvailable({ activeName });
+  if (next) {
+    const res = await accounts.swapTo(next.name);
+    if (res.ok) {
+      rotationCooldownUntil = Date.now() + ROTATION_COOLDOWN_MS;
+      // An automatic rotation changes which account is live just as much as
+      // a manual /account <name> does, so the cached usage rows and the
+      // cached "which account is active" answer are stale the moment it
+      // lands. Without this, /status would keep naming the limited account
+      // for up to 60s after the swap: exactly when the numbers matter most.
+      invalidateUsageCache();
+      lines.push(`Swapped to account "${next.name}". New workers will use it; workers already running are untouched.`);
+      return { outcome: 'swapped', activeName, nextName: next.name, error: null, reset, lines };
     }
-    const next = accounts.nextAvailable({ activeName });
-    if (next) {
-      const res = await accounts.swapTo(next.name);
-      if (res.ok) {
-        rotationCooldownUntil = Date.now() + ROTATION_COOLDOWN_MS;
-        // An automatic rotation changes which account is live just as much as
-        // a manual /account <name> does, so the cached usage rows and the
-        // cached "which account is active" answer are stale the moment it
-        // lands. Without this, /status would keep naming the limited account
-        // for up to 60s after the swap — exactly when the numbers matter most.
-        invalidateUsageCache();
-        lines.push(`Swapped to account "${next.name}". New workers will use it; workers already running are untouched.`);
-        send(`🔄 Session limit on "${activeName || 'the active account'}", swapped to "${next.name}".`, {
-          markdown: false,
-        }).catch(() => {});
-      } else {
-        lines.push(`Swap to "${next.name}" FAILED: ${res.error}. The account is unchanged.`);
-        send(swapFailedLine({ error: res.error, account: activeName || '' }), { markdown: false }).catch(() => {});
-      }
-    } else {
-      const earliest = accounts.earliestReset();
-      rotationPausedUntil = earliest ? earliest * 1000 : Date.now() + 3600_000;
-      lines.push(`No account is available, all of them are limited. Rotation is paused until the earliest reset.`);
-      // The notice is LIVE from here: absolute clock first (it cannot rot),
-      // relative second, re-rendered every five minutes and resolving itself
-      // the moment the wall lifts, whether that is a reset, a manual swap or a
-      // fresh capture.
-      raiseWall('claude', {
-        render: () =>
-          limitWallLine({
-            resetClock: earliest ? fmtUntil(earliest * 1000, { timeZone: OWNER_TZ }) : null,
-            leftText: earliest ? fmtLeft(earliest) : null,
-            codexTaking: CODEX_AVAILABLE && codexFallbackOn() && !codexWalled(),
-          }),
-        lifted: (now) => now >= rotationPausedUntil,
-        resolved: ({ codexAnswered = parkedCodexChats.length } = {}) =>
-          limitWallResolved({ clock: fmtUntil(Date.now(), { timeZone: OWNER_TZ }), codexAnswered }),
-      }).catch(() => {});
-    }
+    // NOTHING MOVED, so the guard must not hold the next caller off a swap
+    // that could still work. Restored rather than zeroed: an earlier genuine
+    // rotation's cooldown is still its own to run out.
+    rotationCooldownUntil = cooldownWas;
+    lines.push(`Swap to "${next.name}" FAILED: ${res.error}. The account is unchanged.`);
+    return { outcome: 'swap_failed', activeName, nextName: next.name, error: res.error, reset, lines };
+  }
+
+  const earliest = accounts.earliestReset();
+  rotationPausedUntil = earliest ? earliest * 1000 : Date.now() + 3600_000;
+  lines.push(`No account is available, all of them are limited. Rotation is paused until the earliest reset.`);
+  // The notice is LIVE from here: absolute clock first (it cannot rot),
+  // relative second, re-rendered every five minutes and resolving itself
+  // the moment the wall lifts, whether that is a reset, a manual swap or a
+  // fresh capture.
+  raiseWall('claude', {
+    render: () =>
+      limitWallLine({
+        resetClock: earliest ? fmtUntil(earliest * 1000, { timeZone: OWNER_TZ }) : null,
+        leftText: earliest ? fmtLeft(earliest) : null,
+        codexTaking: codexTakingChat(),
+      }),
+    lifted: (now) => now >= rotationPausedUntil,
+    resolved: ({ codexAnswered = parkedCodexChats.length } = {}) =>
+      limitWallResolved({ clock: fmtUntil(Date.now(), { timeZone: OWNER_TZ }), codexAnswered }),
+  }).catch(() => {});
+  return { outcome: 'exhausted', activeName, nextName: null, error: null, reset, lines };
+}
+
+/**
+ * Is Codex CONFIGURED to take a chat message the Claude wall turned away?
+ *
+ * This is resolveEngine's own condition for the rate-limit fallback, named
+ * once. It is what decides whether re-dispatching a walled message is a
+ * hand-off or an infinite loop: fail it, and resolveEngine hands the message
+ * straight back to the walled Claude lane.
+ */
+const codexCanTakeChat = () => CODEX_AVAILABLE && codexFallbackOn();
+
+/**
+ * Is Codex actually going to ANSWER one right now?
+ *
+ * The same question with the Codex wall included. Read by the limit-wall
+ * notice and by the chat lane's own rotation line, neither of which may
+ * promise a hand-off to an engine that is out itself. One expression, because
+ * two copies drift into saying different things about the same minute.
+ */
+const codexTakingChat = () => codexCanTakeChat() && !codexWalled();
+
+// A worker died on a session limit. Mark the account, swap to the next one, and
+// hand the assistant ONE note containing all of it. Deliberately not two
+// messages, because the first would have it re-firing the job before the swap
+// had landed.
+async function handleLimitDeath(task, outcome, runId, steers = []) {
+  const detail = String(outcome.answer || '');
+  const rot = await rotateOffLimitedAccount(detail);
+  if (rot.outcome === 'no_claude') return;
+  const lines = rot.lines;
+  // The worker lane's own voice, unchanged: a bubble it can read later, naming
+  // both halves of the swap.
+  if (rot.outcome === 'swapped') {
+    send(`🔄 Session limit on "${rot.activeName || 'the active account'}", swapped to "${rot.nextName}".`, {
+      markdown: false,
+    }).catch(() => {});
+  } else if (rot.outcome === 'swap_failed') {
+    send(swapFailedLine({ error: rot.error, account: rot.activeName || '' }), { markdown: false }).catch(() => {});
   }
 
   handBackToChat(
@@ -2527,6 +2732,113 @@ async function handleLimitDeath(task, outcome, runId, steers = []) {
     runId,
     steers,
   );
+}
+
+/**
+ * WHAT THE CHAT LANE DOES about a rotation. Pure: outcome in, plan out.
+ *
+ * Returns null when the message keeps its ordinary failure, otherwise
+ * { line, retry } where `retry` is the dispatchPrompt options for the ONE
+ * automatic re-run.
+ *
+ * The two guards here are the whole safety argument:
+ *
+ *   • ONE RETRY PER MESSAGE on the swap path. Without the cap, a store of
+ *     three accounts all near their window would spend all three on one
+ *     message, each failure swapping to the next.
+ *   • The wall path only re-dispatches when Codex will ACTUALLY take it
+ *     (`codexCanTake`). resolveEngine hands a walled Claude lane back to
+ *     Claude when Codex is missing or the fallback is switched off, so a
+ *     re-dispatch under those conditions would fail, rotate, plan, re-dispatch
+ *     and never stop. Codex or the both-walled park are both terminal: there
+ *     is no path from either back into this function.
+ */
+function chatLimitRetryPlan(rot, { priority = false, retried = false, codexTaking = false, codexCanTake = false } = {}) {
+  // Nothing was rotated, or the credentials would not write: either way there
+  // is no new account to try, so the failure stands as it is.
+  if (!rot || rot.outcome === 'no_claude' || rot.outcome === 'swap_failed') return null;
+
+  // INTERNAL TRAFFIC KEEPS ITS OWN FAILURE. A worker handback, a scheduled
+  // task and a compaction each own live messages this function knows nothing
+  // about (the "reading it now…" line, the compact notice), and a silent
+  // re-run underneath them settles the wrong one. The rotation already
+  // happened, which is the half that was missing; only the retry is theirs.
+  if (priority) return null;
+
+  const walled = rot.outcome === 'exhausted' || rot.outcome === 'paused';
+  if (!walled) {
+    if (retried) return null; // it has already had its second account
+    return {
+      // `cooldown` swapped under us seconds ago and cannot name either half,
+      // which chatRotatedLine renders as the nameless form rather than lying.
+      line: chatRotatedLine({ from: rot.activeName || '', to: rot.nextName || '' }),
+      // `priority` so the retry runs NOW rather than behind whatever queued
+      // while the first attempt was dying.
+      retry: { priority: true },
+    };
+  }
+  if (!codexCanTake) return null;
+  return { line: chatWalledRetryLine({ codexTaking }), retry: { allowCodexFallback: true } };
+}
+
+/**
+ * A CHAT-LANE CLAUDE RUN FAILED. Rotate if it was a session limit, and say
+ * what happens to the message.
+ *
+ * `detail` MUST be the failure channel (the result event's own text or error
+ * subtype, or the stderr tail). An ANSWER quoting "You've hit your session
+ * limit" is routine (a usage audit is wall to wall with the phrase) and
+ * rotating on a quotation would burn accounts for nothing.
+ *
+ * Returns null when the caller should render its ordinary "Claude run failed",
+ * otherwise { line, dispatch }: `line` is what the run's own progress message
+ * becomes, and `dispatch()` starts the re-run. Split in two so the caller can
+ * settle the bubble they are watching BEFORE the next one appears under it.
+ */
+async function handleChatLimitFailure(detail, ctx = {}) {
+  if (!isLimitSignal(detail)) return null;
+  const { text = '', lane = LANES.main, images = [], kinds = [], prepend = '', priority = false, retried = false } = ctx;
+  const rot = await rotateOffLimitedAccount(detail).catch((e) => {
+    console.error('[bridge] chat account rotation failed:', e.message);
+    return null;
+  });
+  const plan = chatLimitRetryPlan(rot, {
+    priority,
+    retried,
+    codexTaking: codexTakingChat(),
+    codexCanTake: codexCanTakeChat(),
+  });
+  // IT WAS STILL A LIMIT DEATH even when nothing can be retried on it (internal
+  // traffic, a swap that would not write, a wall with no Codex behind it). The
+  // caller has to know that, because the alternative is the chain below sending
+  // the CLI's death message as though it were the assistant's answer and
+  // storing it in the ring as an assistant turn. `line` null means "keep the
+  // ordinary ❌ header", `dispatch` null means "send the ordinary failure".
+  if (!plan) return { line: null, dispatch: null };
+  const toCodex = Boolean(plan.retry.allowCodexFallback);
+  return {
+    line: plan.line,
+    dispatch: () => {
+      // THE HANDOFF BLOCK GOES WITH THE MESSAGE. takeHandoffPrefix already
+      // consumed it for the attempt that just died, so without this an
+      // /engine switch followed by one walled message would burn the whole
+      // carried-over context on a turn that never happened. The Claude retry
+      // carries the rendered block verbatim; the Codex and parked routes have
+      // nowhere to put it, so the flag goes back and the next turn takes it.
+      if (toCodex && prepend) {
+        const st = chatState();
+        st.handoffPending = true;
+        saveState();
+      }
+      dispatchPrompt(text, lane, {
+        ...plan.retry,
+        retried: true,
+        images,
+        kinds,
+        prepend: toCodex ? null : prepend,
+      });
+    },
+  };
 }
 
 // A pointer, not a summary: which worker, which job, how long, what happened.
@@ -2765,8 +3077,14 @@ const handleAccountCallback = createAccountCallbacks({
   // A fresh capture can end a rotation pause (the newly banked account may be
   // the one with headroom), and the cached row for that slot is now about
   // different credentials.
+  //
+  // The COOLDOWN goes with the pause, for the same reason the swap path above
+  // clears both: a capture that lifts a wall leaves a rotation guard armed for
+  // up to 90s behind it, and a real limit death inside that window would come
+  // back "cooldown" and rotate nothing off the account that just hit it.
   onCaptured: () => {
     rotationPausedUntil = 0;
+    rotationCooldownUntil = 0;
     invalidateUsageCache();
   },
   log: (msg) => console.log(`[bridge] ${msg}`),
@@ -5238,8 +5556,17 @@ function flushParkedWalledChats() {
   }
   for (const it of items) {
     // Back through the front door, so the engine is resolved against the state
-    // that exists NOW rather than the one that parked it.
-    dispatchPrompt(it.text, undefined, { allowCodexFallback: true, images: it.images });
+    // that exists NOW rather than the one that parked it. EVERY field the item
+    // carries goes back with it: dropping `retried` handed a message that had
+    // already used its one automatic retry a second one, and dropping `kinds`
+    // and `prepend` lost the album note and the carried handoff block.
+    dispatchPrompt(it.text, undefined, {
+      allowCodexFallback: true,
+      images: it.images,
+      kinds: it.kinds || [],
+      retried: Boolean(it.retried),
+      prepend: it.prepend ?? null,
+    });
   }
 }
 
@@ -6503,10 +6830,15 @@ async function handleCommand(text, msg = null) {
         }
         const r = await accounts.captureCurrent(name);
         // A fresh capture can end a rotation pause: the newly banked account
-        // may be the one with headroom. And the cached usage is keyed by slot
-        // name — this slot now holds different credentials, so the cached row
-        // is about the wrong account.
-        if (r.ok) rotationPausedUntil = 0;
+        // may be the one with headroom. The cooldown goes with it, or a real
+        // limit death in the next 90s finds a guard armed for a wall that is
+        // gone. And the cached usage is keyed by slot name: this slot now
+        // holds different credentials, so the cached row is about the wrong
+        // account.
+        if (r.ok) {
+          rotationPausedUntil = 0;
+          rotationCooldownUntil = 0;
+        }
         if (r.ok) invalidateUsageCache();
         // Same builders as the button path, so the typed rail and the tapped
         // rail cannot say the same thing two different ways — and so the email
@@ -6838,11 +7170,29 @@ function pickLane(prompt) {
  * with no knowledge of it. The item now carries every input the decision needs,
  * because the drain makes that decision again.
  */
-function queueItem(text, { images = [], kinds = [], forcedEngine = null, priority = false, allowCodexFallback = false } = {}) {
+// ONE LINE, deliberately: the wiring suite extracts this function by source
+// (grab() in bg-codex-wiring.test.mjs) and its extractor stops at the first
+// unindented line, so a signature wrapped onto a `) {` of its own is grabbed
+// truncated and the whole harness fails to parse.
+function queueItem(text, { images = [], kinds = [], forcedEngine = null, priority = false, allowCodexFallback = false, retried = false, prepend = null } = {}) {
   // `kinds` is what ARRIVED, not what is being sent to a model: the run bubble's
   // first frame says "📎 3 photos" so a slow album is visibly landing rather
   // than silently missing.
-  return { text, images: images || [], kinds: kinds || [], forcedEngine: forcedEngine || null, priority, allowCodexFallback };
+  //
+  // `retried` is the one-automatic-retry cap for a session limit, and `prepend`
+  // the handoff block a retried message was already carrying. Both ride on the
+  // ITEM because a queued retry is drained by a different call than the one
+  // that decided it, and a cap the drain cannot see is not a cap.
+  return {
+    text,
+    images: images || [],
+    kinds: kinds || [],
+    forcedEngine: forcedEngine || null,
+    priority,
+    allowCodexFallback,
+    retried: Boolean(retried),
+    prepend: prepend == null ? null : String(prepend),
+  };
 }
 const asQueueItem = (v) => (typeof v === 'string' ? queueItem(v) : v);
 
@@ -7041,7 +7391,8 @@ function startResolvedRun(decision, lane, item, { laneBusy = false } = {}) {
 
 // priority = a completed worker's report: never drop it for queue limits, and
 // jump the line so results surface before newer user prompts.
-function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallback = false, images = [], kinds = [] } = {}) {
+// One line for the same reason as queueItem above: grab() extracts it by source.
+function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallback = false, images = [], kinds = [], retried = false, prepend = null } = {}) {
   // A `codex:` or `claude:` prefix on a typed message pins THIS message's
   // engine, beating both /engine and the config. Stripped before dispatch so
   // the model never sees the routing instruction as part of its prompt.
@@ -7057,7 +7408,7 @@ function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallba
   const p2 = parseEnginePrefix(p1.text.replace(/^\s*bg:\s*/i, ''));
   const forcedEngine = p1.engine || p2.engine;
   const text = p2.text;
-  const item = queueItem(text, { images, kinds, forcedEngine, priority, allowCodexFallback });
+  const item = queueItem(text, { images, kinds, forcedEngine, priority, allowCodexFallback, retried, prepend });
   // BOTH ENGINES WALLED. Only for a message they typed: internal traffic ignores
   // the wall by construction (see engineForItem). Spawning here produces two
   // failures a minute on a lane that cannot answer, so the message is parked
@@ -7140,9 +7491,15 @@ function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallba
     deliverWithoutClaude(text);
     return;
   }
-  runClaude(text, lane, { prepend: lane === LANES.main && !priority ? takeHandoffPrefix('claude') : '', kinds }).catch((e) =>
-    console.error('[bridge] runClaude error:', e),
-  );
+  runClaude(text, lane, {
+    // A retry hands over the block the dead attempt was already carrying,
+    // rather than asking for a second one that no longer exists.
+    prepend: item.prepend != null ? item.prepend : lane === LANES.main && !priority ? takeHandoffPrefix('claude') : '',
+    kinds,
+    images,
+    priority,
+    retried,
+  }).catch((e) => console.error('[bridge] runClaude error:', e));
 }
 
 /**
@@ -7201,9 +7558,13 @@ function drainQueue(lane) {
     return;
   }
   runClaude(item.text, lane, {
-    prepend: lane === LANES.main && !item.priority ? takeHandoffPrefix('claude') : '',
+    prepend:
+      item.prepend != null ? item.prepend : lane === LANES.main && !item.priority ? takeHandoffPrefix('claude') : '',
     // A queued album still says what it is holding when its turn comes.
     kinds: item.kinds || [],
+    images: item.images || [],
+    priority: Boolean(item.priority),
+    retried: Boolean(item.retried),
   }).catch((e) => console.error('[bridge] runClaude error:', e));
 }
 

@@ -59,6 +59,8 @@ import {
   limitWallLine,
   limitWallResolved,
   swapFailedLine,
+  chatRotatedLine,
+  chatWalledRetryLine,
   bothWalledLine,
   enginesBackLine,
 } from './system-messages.mjs';
@@ -682,6 +684,43 @@ t('wall: the swap failure says which account he is still on', () => {
   ok(swapFailedLine({ error: 'y'.repeat(400) }).split('\n')[1].length <= 81, 'a stack trace cannot become the message');
 });
 
+t('wall: ★ the CHAT lane says which account went out and which one is live', () => {
+  // The bubble they are watching, edited. Before this existed a chat-lane limit
+  // came back "❌ Error · 5s" with two free accounts in the store and the
+  // account was rotated by hand.
+  eq(
+    chatRotatedLine({ from: 'first@example.com', to: 'second@example.com' }),
+    '🔄 Session limit on first@example.com\n👤 Swapped to second@example.com\n⏳ Retrying your message',
+  );
+  // A name long enough to wrap is clipped rather than wrapped: a wrapped
+  // account name reads as two accounts.
+  ok(chatRotatedLine({ from: 'x'.repeat(90), to: 'y'.repeat(90) }).split('\n').every((l) => l.length <= 44));
+  ok(chatRotatedLine({ from: 'a' }).split('\n').length === 2, 'no destination, no destination line');
+  eq(
+    chatRotatedLine({}),
+    '🔄 Session limit hit\n⏳ Retrying on the live account',
+    'the cooldown case cannot name either half, so it claims neither',
+  );
+  ok(!/[Ss]wapped/.test(chatRotatedLine({})), 'and it must not claim a swap it cannot see: the account it died on may BE the live one');
+  ok(!chatRotatedLine({}).includes('undefined'), 'it never says so by printing undefined');
+});
+
+t('wall: ★ the chat rotation line resolves the ⏳ it puts up', () => {
+  // Rule 8: a wait is one message edited to a terminal state. This ⏳ is
+  // resolved by the retry's OWN run bubble replacing it, and by the ⛔ variant
+  // when there is nothing to retry on.
+  ok(chatRotatedLine({ from: 'a', to: 'b' }).includes('⏳'), 'the wait glyph');
+  ok(chatWalledRetryLine({ codexTaking: true }).startsWith('⛔'), 'the other ending');
+});
+
+t('wall: the walled chat line says who is taking the message, or that it is parked', () => {
+  eq(
+    chatWalledRetryLine({ codexTaking: true }),
+    '⛔ Session limit, no account free\n🧠 Codex is taking this message',
+  );
+  eq(chatWalledRetryLine({}), '⛔ Session limit, no account free\n⏳ Your message is parked');
+});
+
 t('wall: both engines out names BOTH clocks, glyph-labelled', () => {
   eq(
     bothWalledLine({ claudeAt: '13:45', codexAt: '14:20' }),
@@ -707,6 +746,11 @@ t('wall: ★ every wall shape passes the house-style gates', () => {
     [limitWallLine({}), 'limitWallLine/unknown'],
     [limitWallResolved({ clock: '14:01', codexAnswered: 4 }), 'limitWallResolved'],
     [swapFailedLine({ error: 'no captured credentials', account: 'owner@example.com' }), 'swapFailedLine'],
+    [chatRotatedLine({ from: 'first@example.com', to: 'second@example.com' }), 'chatRotatedLine'],
+    [chatRotatedLine({ from: 'x'.repeat(90), to: 'y'.repeat(90) }), 'chatRotatedLine/long names'],
+    [chatRotatedLine({}), 'chatRotatedLine/nameless'],
+    [chatWalledRetryLine({ codexTaking: true }), 'chatWalledRetryLine'],
+    [chatWalledRetryLine({}), 'chatWalledRetryLine/parked'],
     [bothWalledLine({ claudeAt: '13:45', codexAt: '14:20' }), 'bothWalledLine'],
     [enginesBackLine({ engine: 'codex', count: 3 }), 'enginesBackLine'],
   ]) {

@@ -696,6 +696,48 @@ export function enginesBackLine({ engine = null, count = 0 } = {}) {
   return `▶️ ${who} is back · running ${n} parked`;
 }
 
+/**
+ * THEIR OWN MESSAGE hit the wall, and the bridge rotated under it.
+ *
+ * The background lane has had this since rotation existed; the chat lane had
+ * nothing, so a message the owner was sitting there waiting on came back
+ * "❌ Error · 5s" with two other accounts free and they swapped by hand. This
+ * is the line that run's own progress message becomes: not a new bubble,
+ * because the bubble they are watching is the one that owes them the answer.
+ *
+ * Three facts, three lines: which account went out, which one is live now, and
+ * that they do not have to do anything. Names are clipped to the bubble rather
+ * than wrapped, because a wrapped account name reads as two accounts.
+ */
+export function chatRotatedLine({ from = '', to = '' } = {}) {
+  const lines = [];
+  // NO NAMES: something else rotated seconds ago (the cooldown), so this run
+  // did not make the swap and cannot name its halves. It also cannot know
+  // whether the account it died on is still the live one, so it claims neither:
+  // what it says instead is only what is certainly true, that the retry runs on
+  // whatever is live now.
+  if (!from && !to) return ['🔄 Session limit hit', '⏳ Retrying on the live account'].join('\n');
+  lines.push(from ? `🔄 Session limit on ${clip(oneLine(from), 23)}` : '🔄 Session limit hit');
+  if (to) lines.push(`👤 Swapped to ${clip(oneLine(to), 29)}`);
+  lines.push('⏳ Retrying your message');
+  return lines.join('\n');
+}
+
+/**
+ * The same moment with NOTHING to swap to (ACC-03, chat side).
+ *
+ * The ⛔ wall notice carries the clock and is its own live message; this one is
+ * only what the dead run's bubble becomes, so it says what happens to THIS
+ * message and nothing else. Which of the two second lines is true is decided by
+ * the caller, from the same expression the wall line uses.
+ */
+export function chatWalledRetryLine({ codexTaking = false } = {}) {
+  return [
+    '⛔ Session limit, no account free',
+    codexTaking ? '🧠 Codex is taking this message' : '⏳ Your message is parked',
+  ].join('\n');
+}
+
 // ---------------------------------------------------------------------------
 // /new: one message, one glyph
 // ---------------------------------------------------------------------------

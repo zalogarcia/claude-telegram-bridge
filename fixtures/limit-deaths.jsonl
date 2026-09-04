@@ -1,0 +1,21 @@
+// Real session-limit deaths, captured from runs/ on 2026-09-04 and reduced to the
+// four fields the daemon reads. runs/ is gitignored, so without this file the
+// measured-corpus test in bg-codex-wiring.test.mjs is red on every fresh clone.
+// THE POINT OF THE SHAPE: is_error is true, subtype is "success", the message is
+// in `result`, and NOTHING is on stderr. A guard that reads stderr finds none of
+// these, which is exactly what the first cut of the chat-lane rotation did.
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 11:10pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 12:20am (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 1pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 3:50pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 5:30pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 9:50pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 1:30pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 6pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 10:40pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 1:10pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 9:50pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 1:30pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 3:50pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 1:10pm (America/Caracas)"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 6:30pm (America/Caracas)"}
