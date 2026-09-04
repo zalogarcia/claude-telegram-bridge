@@ -52,7 +52,7 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 | 🎙️ **Voice notes** | Talk instead of typing. Transcribed with Whisper, run as a prompt. |
 | 📎 **Files & photos** | Send a screenshot with "why does this look broken?" — images, PDFs, code, anything ≤20MB. |
 | ⏰ **Reminders & cron** | "Remind me at 8" or "every morning summarize yesterday's commits" — the second one actually runs. |
-| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap — and when the active account is rate limited, Leash swaps to the next one and retries your message, chat and background alike. |
+| 👤 **Multiple Claude accounts** | Hold a personal *and* a work subscription? Enroll both, see each one's live 5h/weekly headroom, swap with one tap. When the active account is rate limited, Leash swaps to the next one and retries your message, chat and background alike. [Details.](docs/multi-account.md) |
 | 🩺 **Self-healing** | KeepAlive restarts crashes; a two-strike watchdog catches wedges and tells you it did. |
 | 🎛️ **Full CLI access** | Your custom slash commands work. Switch models mid-conversation. Check usage. |
 
