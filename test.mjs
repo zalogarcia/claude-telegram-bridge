@@ -213,6 +213,71 @@ t('disposable progress edits never retry into a 429', () => {
   ok(/editCooldownUntil = /.test(fn), 'editProgress must set a cooldown on 429');
 });
 
+
+// ---------- the outbound funnel: what actually reaches Telegram ----------
+// The unit suites prove the RENDERERS. This proves the WIRING: sendRich and
+// sendResult are pulled out of bridge.mjs BY SOURCE (importing it would boot a
+// second daemon) and run against a stub Telegram, so the assertions are about
+// the payloads a client would actually receive. The dash normalizer is REAL
+// here, and switchable, because whether a reply still carries an em dash by the
+// time it leaves is exactly what this section is for.
+const url = (f) => JSON.stringify(pathToFileURL(path.join(DIR, f)).href);
+const SEND = await import(
+  'data:text/javascript,' +
+    encodeURIComponent(
+      `import { chunks, escHtml, stripHtml, mdToTelegramHtml } from ${url('md-format.mjs')};
+       import { mdToRichBlocks, chunkBlocks, shouldUseRich, stripModeMarkers, detailsToHtml } from ${url('rich-format.mjs')};
+       import { normalizeDashes } from ${url('dash-normalize.mjs')};
+       const CHAT_ID = 'TEST';
+       export let NO_DASHES = false;
+       export const setNoDashes = (v) => { NO_DASHES = v; };
+       ${src.match(/const TG_MSG_LIMIT = \d+;/)[0]}
+       export const box = { calls: [], richFails: false };
+       const tg = async (method, payload) => {
+         if (box.richFails && method === 'sendRichMessage') throw new Error('sendRichMessage: 400');
+         box.calls.push({ method, payload });
+       };
+       ${src.match(/let richOk = .*/)[0]}
+       ${grab('sendRich')}
+       ${grab('sendResult')}
+       export { sendResult };
+       export const reset = () => { box.calls = []; box.richFails = false; richOk = true; NO_DASHES = false; };`,
+    )
+);
+const ta = async (name, fn) => {
+  try {
+    await fn();
+    pass++;
+  } catch (e) {
+    failures.push(`${name}\n    ${e.message}`);
+  }
+};
+const DASHES = JSON.parse(readFileSync(path.join(DIR, 'scripts', 'probes', 'fixtures', 'dashes.json'), 'utf8'));
+
+await ta('★ with style.noDashes on, an em dash never reaches the phone', async () => {
+  SEND.reset();
+  SEND.setNoDashes(true);
+  await SEND.sendResult(DASHES.spaced.in);
+  const text = SEND.box.calls.map((c) => JSON.stringify(c.payload)).join('');
+  ok(!/[\u2013\u2014]/.test(text), `a dash survived to the payload: ${text}`);
+  ok(text.includes('We shipped it, and it worked.'), text);
+});
+
+await ta('★ and a code block in the same reply keeps its dashes', async () => {
+  SEND.reset();
+  SEND.setNoDashes(true);
+  await SEND.sendResult(DASHES.fence.in);
+  const text = SEND.box.calls.map((c) => JSON.stringify(c.payload)).join('');
+  ok(/echo a [\u2014] b/.test(text), `the dash inside the fence was rewritten: ${text}`);
+});
+
+await ta('with the flag off, the model keeps its own voice', async () => {
+  SEND.reset();
+  await SEND.sendResult(DASHES.spaced.in);
+  const text = SEND.box.calls.map((c) => JSON.stringify(c.payload)).join('');
+  ok(/[\u2014]/.test(text), `the flag is off but the dash was still rewritten: ${text}`);
+});
+
 // ---------- report ----------
 console.log(`\n${pass} passed, ${failures.length} failed\n`);
 if (failures.length) {
