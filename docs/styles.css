@@ -503,6 +503,31 @@ main[id] {
   margin: 16px 0 0;
 }
 
+/* ── watch ────────────────────────────────────────────────────── */
+.watch-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.watch-alt {
+  color: var(--grey);
+  font-size: 14px;
+  margin: 10px 0 0;
+}
+.watch-alt a {
+  color: var(--grey);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-2);
+}
+.watch-alt a:hover {
+  color: var(--orange);
+}
+
 /* ── chat demo ─────────────────────────────────────────────────────── */
 .demo-grid {
   display: grid;
