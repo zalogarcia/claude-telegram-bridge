@@ -507,7 +507,7 @@ export function codexFailureRemedy(failure, { until = null, timeZone } = {}) {
 
 /**
  * The Codex twin of bgOutcome: (last message, event log, exit code) in, the
- * thing M is told out. Same { status, answer, record } contract, so the
+ * thing the assistant is told out. Same { status, answer, record } contract, so the
  * reporting path downstream does not care which engine ran.
  *
  * `record: null` means "leave no row", matching a silent Claude worker.
@@ -602,7 +602,7 @@ export function codexStartNotice({ runId, mode = 'ask', cwd = null, title = '', 
 }
 
 /**
- * The header of the handback M receives.
+ * The header of the handback the assistant receives.
  *
  * It must state three things a Claude worker's handback does not have to:
  * WHICH ENGINE produced it (a Codex answer has none of this session's context
@@ -711,8 +711,8 @@ export function codexThinkingLine({ elapsedSec = 0, resumed = false, images = 0 
   return bits.join(' · ');
 }
 
-// How the chat lane says a Codex turn failed. Short: he is in a conversation,
-// not reading a report, and the log path is what he would actually need next.
+// How the chat lane says a Codex turn failed. Short: they are in a conversation,
+// not reading a report, and the log path is what they would actually need next.
 //
 // The REMEDY is the line that matters. Four failure classes used to render as
 // one sentence of raw CLI text, so "sign in again", "wait for the window" and
@@ -742,7 +742,7 @@ export function codexNewThreadReply({ had = true } = {}) {
 }
 
 // Where the thread stands, for /status and /engine. NEVER the id itself: it is
-// an opaque handle to a conversation on OpenAI's side, it is useless to him,
+// an opaque handle to a conversation on OpenAI's side, it is useless to them,
 // and a handle printed into a chat is a handle that ends up in a screenshot.
 export function codexThreadStatus(startedAt, { now = Date.now() } = {}) {
   if (!startedAt) return 'fresh';
@@ -778,7 +778,7 @@ export const TOKEN_SHAPES = [
   // became the scrubber for a NEW on-disk record of the conversation (the chat
   // ring) and for text injected into the other engine's privileged prompt. A
   // QA pass fed it five shapes this owner uses daily and all five went through
-  // verbatim. The ones that matter here are the ones he pastes into a chat.
+  // verbatim. The ones that matter here are the ones they paste into a chat.
   /\bsb(?:_secret|p)_[A-Za-z0-9_-]{8,}/, // a Supabase secret / access token
   /\bAKIA[0-9A-Z]{16}\b/, // an AWS access key id
   /\bxox[baprs]-[A-Za-z0-9-]{8,}/, // a Slack token

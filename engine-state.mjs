@@ -202,7 +202,7 @@ export function parseEngineCommand(arg) {
  * One tested function rather than an if-chain in the /engine arm, because every
  * branch here is a way the switch could have hung: the whole point of the
  * ladder is that a handoff never waits on a wall and never spawns into one. The
- * owner is usually switching BECAUSE something is wrong with the engine he is
+ * owner is usually switching BECAUSE something is wrong with the engine they are
  * leaving, which is exactly when asking it for a favour fails.
  *
  * Returns { rung, skip: [reasons] }. rung 2 only when every condition is clear.
@@ -361,7 +361,7 @@ export function voiceUntranscribedLine(engine = 'claude', { reason = 'no_key' } 
   }
   lines.push(`${engine === 'codex' ? '🧠 Codex' : '🤖 Claude'} only has the file path.`);
   // The key is named on BOTH paths: a failed whisper call and a missing key
-  // leave him in the same place, and a wrong key is the most common cause of
+  // leave them in the same place, and a wrong key is the most common cause of
   // the first. Only the no_key line claims it is absent.
   lines.push(reason === 'no_key' ? 'Set the key, or type the message instead.' : 'Check OPENAI_API_KEY, or type it instead.');
   return lines.join('\n');
@@ -433,7 +433,7 @@ const handoffAgo = (ageSec) => (Number(ageSec) < 10 ? 'just now' : `${fmtAge(age
  * Not a debug block: every one of these changes what the owner should do next.
  * An unreachable path means the incoming engine will fail on that file; a
  * missing tool means it will answer without one; a window at 82% means the
- * engine he just switched to may stop mid-afternoon.
+ * engine they just switched to may stop mid-afternoon.
  */
 function switchWarningLines(engine, warnings = {}) {
   const out = [];
@@ -472,7 +472,7 @@ function switchWarningLines(engine, warnings = {}) {
  *   LIVE      `pendingLine` is the ⏳ line, and it is the LAST line on purpose:
  *             the caller keeps the message id and edits that one line in place
  *             when the capture settles (resolveCaptureLine), so the feedback
- *             lands on the message he is already looking at. No second message.
+ *             lands on the message they are already looking at. No second message.
  *
  * When the ladder skips the capture turn, `capture` is null, there is no ⏳
  * line, and nothing will ever edit the message: what it says at send time is
@@ -528,12 +528,12 @@ export function switchView({
 /**
  * WHAT THE ⏳ LINE BECOMES. Exactly one of these, always, and never a second
  * message: the capture turn either improved the handoff or it did not, and the
- * owner needs to know which before he types his next message.
+ * owner needs to know which before they type their next message.
  *
  * `reason` is the failure class, and each one is a different fact:
  *   timeout     it is still running and the deadline passed
  *   walled      it died on a usage limit, with the reset time when we know it
- *   superseded  he already sent the next message, which consumed the recorded
+ *   superseded  they already sent the next message, which consumed the recorded
  *               handoff; a better one now would be context for a turn that has
  *               already happened
  *   failed      anything else (auth, a dead thread, a crash)

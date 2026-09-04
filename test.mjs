@@ -273,6 +273,39 @@ t('handBackToChat is always called with its run id', () => {
   }
 });
 
+t('an import renamed with `as` leaves no call site on the old name', () => {
+  // `import { spawn as spawnProcess }` left one `spawnImpl: spawn` behind. It
+  // sits inside an arrow, so it is a CALL-TIME ReferenceError that the caller's
+  // .catch() swallows: /account rendered "the codex account could not be read"
+  // and nothing crashed. node --check cannot see it and no unit suite reached
+  // it. This rule is deterministic and has no false positives: if a name was
+  // renamed at the import, that name is not a binding in this file.
+  const renamed = [...src.matchAll(/import\s*\{([^}]*)\}\s*from/gs)]
+    .flatMap((m) => m[1].split(','))
+    .map((p) => p.trim().match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/))
+    .filter(Boolean)
+    .map((m) => m[1]);
+  ok(renamed.length > 0, 'expected at least one aliased import to guard');
+  for (const old of renamed) {
+    // Skip the import line itself; anywhere else the old name is unbound.
+    // Comments and string literals are stripped first: the WORD "spawn" is all
+    // over the prose in this file, and a tripwire that fires on prose is a
+    // tripwire nobody reads.
+    const codeOnly = (l) =>
+      l
+        .replace(/\/\/.*$/, '')
+        .replace(/^\s*\*.*$/, '') // a JSDoc continuation line is prose too
+        .replace(/`(?:\\.|[^`\\])*`/g, '``')
+        .replace(/'(?:\\.|[^'\\])*'/g, "''")
+        .replace(/"(?:\\.|[^"\\])*"/g, '""');
+    const offenders = src
+      .split('\n')
+      .map((l, i) => [i + 1, codeOnly(l)])
+      .filter(([, l]) => !/^import\s/.test(l) && new RegExp(`(^|[^.\\w$])${old}\\s*[(,)]`).test(l));
+    ok(offenders.length === 0, `\`${old}\` was renamed at the import but is still called at ${offenders.map(([n]) => n).join(', ')}`);
+  }
+});
+
 t('the report id is resolved once per outcome funnel', () => {
   // The durable row in bg-results.jsonl and the file on disk must name the SAME
   // report, so both funnels bind it before they use it.

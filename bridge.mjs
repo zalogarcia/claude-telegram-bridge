@@ -396,8 +396,8 @@ const CODEX_MODEL = conf('codexModel', '') || null; // empty = the CLI's own def
 // config.json to pin the chat lane back to `codex exec` (the fallback path is
 // kept intact and is reached automatically on an older CLI anyway).
 const CODEX_APP_SERVER = String(conf('codexAppServer', 'true')) !== 'false';
-// NO EM DASHES ON THE WAY OUT. Codex writes them by default where Claude has
-// been trained off them by its CLAUDE.md, so a two-engine
+// NO EM DASHES ON THE WAY OUT. The owner's standing rule for their own copy, and Codex
+// writes them by default where Claude has been trained off them, so a two-engine
 // bridge answers in two registers unless something normalizes at the funnel.
 // OFF by default here: the model keeps its own voice unless you ask otherwise.
 // See dash-normalize.mjs for what it will and will not touch (code spans,
@@ -1059,7 +1059,7 @@ const BG_PROGRESS_ON = String(confObj('progress').background ?? 'true') !== 'fal
 const WORKER_ORPHAN_MS = 2 * 60_000;
 
 // How long a line that has reached "reading it now…" waits for the assistant to finish
-// before it retires itself. Generous: a long report genuinely takes her a
+// before it retires itself. Generous: a long report genuinely takes it a
 // while, and the text on screen is correct either way. This only bounds the
 // OBJECT, so a handback that never lands cannot leak one per job.
 const WORKER_KEEPALIVE_MAX_MS = 30 * 60_000;
@@ -1174,7 +1174,7 @@ function editWorkerNotice(runId, patch, { keepAlive = false } = {}) {
 
 /**
  * `prepend` is the engine handoff, and it is why `rawText` and `text` are two
- * things here: what he TYPED is what /status, the chat ring and the archive
+ * things here: what they TYPED is what /status, the chat ring and the archive
  * describe the turn by, and what is SENT may carry a page of context in front
  * of it. Empty on every other path, which is all of them but the first message
  * after a switch.
@@ -1233,7 +1233,7 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
     const wordSeed = Math.floor(Math.random() * THINKING_WORDS.length);
 
     // The bg lane's output reaches the owner through handBackToChat (into the chat
-    // lane's session) and bg-results.jsonl — never as a bubble he reads. So its
+    // lane's session) and bg-results.jsonl — never as a bubble they read. So its
     // progress message and every 2.5s edit were pure rate-limit spend against
     // the SAME per-chat bucket the conversation needs. Skipping the message
     // leaves progressMsgId null, which short-circuits renderProgress and the
@@ -1502,7 +1502,7 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
             progress.push(entry);
             toolLines.push(entry);
             // `exists`/`commands`: a path SCANNED out of a Bash command is text
-            // (a grep pattern, a log group, a slash command he mentioned), so
+            // (a grep pattern, a log group, a slash command they mentioned), so
             // it counts only if it is really on disk. The tool's own file_path
             // and cwd need no such proof. See filterProsePaths.
             for (const p of pathsFromToolInput(block.input, { exists: existsSync, commands: COMMAND_NAMES })) {
@@ -1678,7 +1678,7 @@ function runClaude(rawText, lane = LANES.main, { prepend = '', kinds = [] } = {}
         // down and this arm returns before reportBgOutcome, which is the only
         // thing that edits the 🌙 line to a terminal state, so the line used to
         // sit at "⏳ 4m 12s · 23 steps" for the life of the chat: the reader's
-        // only object for that job, frozen mid-sentence, on the one outcome he
+        // only object for that job, frozen mid-sentence, on the one outcome they
         // caused himself. inflight was already cleared above, so the watchdog
         // will not resolve it either.
         if (isBg && logPath) {
@@ -2363,7 +2363,7 @@ const codexAccount = createCodexAccount({
       return e.code === 'ENOENT' ? null : 'broken';
     }
   },
-  fetchLimits: () => fetchCodexRateLimits({ spawnImpl: spawn, bin: CODEX_BIN }),
+  fetchLimits: () => fetchCodexRateLimits({ spawnImpl: spawnProcess, bin: CODEX_BIN }),
   listRuns: () => readCodexRuns({ runsDir: RUNS_DIR, readdir: readdirSync, readFile: (f) => readFileSync(f, 'utf8') }),
   timeZone: OWNER_TZ,
 });
@@ -2636,7 +2636,7 @@ async function renderAccountView(status = null) {
   const snapshot = await withDeadline(accountUsage.all(), 6_000, null);
   const live =
     snapshot?.active || (await withDeadline(accountUsage.resolveActive(), 2_000)) || { liveFingerprint: 'none' };
-  // The body is rendered by account-usage.mjs so the exact strings he reads have
+  // The body is rendered by account-usage.mjs so the exact strings they read have
   // a unit test; this half stays what it always was — fetch, render, attach the
   // keyboard. The keyboard is still built from the UNORDERED describe() list,
   // because the callback payload encodes an index into exactly that list and
@@ -2695,12 +2695,12 @@ async function sendAccountView({ text, markup, markdown = true }) {
   return last;
 }
 
-// After a tap, refresh the message he tapped rather than pushing a new one: the
-// buttons update in place (the account he just swapped to drops out of the list)
+// After a tap, refresh the message they tapped rather than pushing a new one: the
+// buttons update in place (the account they just swapped to drops out of the list)
 // and there is no second copy of the view to tap stale buttons on. Falls back to
 // a new message if the edit is refused — an edit can fail for reasons that have
 // nothing to do with us (message too old, deleted), and the result of a swap has
-// to reach him either way.
+// to reach them either way.
 async function refreshAccountView({ messageId, status }) {
   const view = await renderAccountView(status);
   if (messageId) {
@@ -2722,7 +2722,7 @@ async function refreshAccountView({ messageId, status }) {
 
 // answerCallbackQuery: the ONLY thing that clears the spinner Telegram puts on a
 // tapped button. `text` is capped at 200 characters by the API, so it is clipped
-// here rather than rejected there. show_alert for anything he must actually read
+// here rather than rejected there. show_alert for anything they must actually read
 // — a toast is gone in five seconds.
 async function answerCallback(callbackId, text, { alert = false } = {}) {
   if (!callbackId) return;
@@ -2755,7 +2755,7 @@ const handleAccountCallback = createAccountCallbacks({
   // scrolled — so it must land before the handler returns, not eventually.
   notify: (text) => send(text, { markdown: true }),
   // A tap is the same act as a typed /account <name>, so it takes the same side
-  // effects: he is choosing an account by hand, which overrides the
+  // effects: they are choosing an account by hand, which overrides the
   // everything-is-limited stand-down, and the cached usage rows are stale.
   onSwapped: () => {
     rotationPausedUntil = 0;
@@ -2880,14 +2880,14 @@ function handBackToChat(task, output, status, runId, steers = [], { engine = 'cl
   if (handbackStreak > HANDBACK_STREAK_MAX) {
     // Chain capped. Stop feeding the assistant, and do NOT dump the worker's raw report to
     // the owner. Worker output is internal engineering detail written FOR the agent
-    // (measurements, gate exits, file paths); pasting it at him is exactly the
+    // (measurements, gate exits, file paths); pasting it at them is exactly the
     // "never paste raw agent output" rule the whole lane exists to enforce, and
     // it reads as a wall of noise on a phone. (reported twice on 2026-08-02: "Fix the
     // leaking of msgs, still coming to me".)
     //
     // Nothing is lost: every outcome is already persisted to bg-results.jsonl,
     // and the full text is on disk at full.file. The assistant picks the parked reports up
-    // on his next message, which resets the streak.
+    // on their next message, which resets the streak.
     parkedHandbacks.push({ task: clip(oneLine(task), 200), status, report: full?.file || null });
     if (!handbackCapNotified) {
       handbackCapNotified = true;
@@ -3079,7 +3079,7 @@ function engineFor(lane, forcedEngine = null, { ignoreWall = false } = {}) {
     lane,
     forcedEngine,
     chat: chatState(),
-    config: fileConfig,
+    config: ENGINE_CONFIG,
     claudeAvailable: CLAUDE_AVAILABLE,
     codexAvailable: CODEX_AVAILABLE,
     // `ignoreWall` is for INTERNAL traffic. The rate-limit fallback is a
@@ -3116,7 +3116,7 @@ function settledEngine(lane) {
   const d = resolveEngine({
     lane,
     chat: chatState(),
-    config: fileConfig,
+    config: ENGINE_CONFIG,
     claudeAvailable: CLAUDE_AVAILABLE,
     codexAvailable: CODEX_AVAILABLE,
     rotationPausedUntil: 0,
@@ -3298,7 +3298,7 @@ function captureHandoff(fromEngine, toEngine, onSettle = () => {}) {
       onAnswer: (outcome) => {
         if (outcome.status === 'finished') return settle(parseHandoffJson(outcome.answer));
         // A capture that died on the ChatGPT window is different news from one
-        // that timed out: he has just switched TO an engine that is walled.
+        // that timed out: they have just switched TO an engine that is walled.
         if (outcome.failure === 'rate_limit') {
           return settled({
             ok: false,
@@ -4449,9 +4449,9 @@ const codexFallbackToldAbout = new Set();
 /**
  * One Codex chat turn, on `codex exec`.
  *
- * `prompt` is what is SENT and `rawText` is what he TYPED: they differ only
+ * `prompt` is what is SENT and `rawText` is what they TYPED: they differ only
  * when a handoff block is prepended, and the difference is load-bearing, since
- * /status, the chat ring and the retry below all describe the turn by his own
+ * /status, the chat ring and the retry below all describe the turn by their own
  * words rather than by a page of injected context.
  *
  * `retriedCold` is set by the one automatic retry: see the dead-thread branch
@@ -4506,7 +4506,7 @@ function runCodexChatExec(rawText, { images = [], prompt = null, retriedCold = f
   // still leaves the question. The retry below re-sends the same rawText, and
   // recordChatTurn is cheap enough that one duplicate row beats the
   // bookkeeping needed to avoid it.
-  // `alreadyRinged`: the app-server path records his message before it knows
+  // `alreadyRinged`: the app-server path records their message before it knows
   // whether the server is reachable, so a fall-through to here must not write a
   // second copy of the same question into the ring the handoff is built from.
   if (!retriedCold && !alreadyRinged) recordChatTurn({ engine: 'codex', role: 'user', text: rawText });
@@ -4586,7 +4586,7 @@ function runCodexChatExec(rawText, { images = [], prompt = null, retriedCold = f
           // THE SAME FOOTER THE CLAUDE LANE DRAWS, and no token count. This is
           // the bubble the owner was actually looking at when they said it should not
           // show the in and out tokens, so fixing it only on the app-server path
-          // would have left his complaint alive on the fallback one. The numbers
+          // would have left their complaint alive on the fallback one. The numbers
           // are in the sidecar, which is what /account and /usage read.
           const head = run.stopped ? '🛑 Stopped' : outcome.status === 'finished' ? '✅ Done' : '❌ Error';
           await editProgress(
@@ -4635,7 +4635,7 @@ function runCodexChatExec(rawText, { images = [], prompt = null, retriedCold = f
   // WHY THIS TURN IS NOT STEERABLE, said once, when this path was reached by
   // falling back rather than by choice. Silence here is what made the two
   // engines feel like two products: the owner types mid-turn, nothing splices,
-  // and nothing explains it. Not sent on the cold retry (he was told once) and
+  // and nothing explains it. Not sent on the cold retry (they were told once) and
   // not sent when the app-server was never in play.
   if (fellBack && !retriedCold && !codexFallbackToldAbout.has(fellBack)) {
     codexFallbackToldAbout.add(fellBack);
@@ -4696,7 +4696,7 @@ function runCodexChatExec(rawText, { images = [], prompt = null, retriedCold = f
 // deliberately the same: the same cycling header, the same expandable step
 // list, the same "✅ Done · Ns · N steps" footer, the same
 // "➡️ Sent into the running task." ack for a mid-turn message. What differs is
-// the brain emoji, because he asked for exactly one visible difference and that
+// the brain emoji, because they asked for exactly one visible difference and that
 // is it.
 //
 // TOKENS ARE NOT ON THE BUBBLE. They were, and they were the one thing that
@@ -4771,7 +4771,7 @@ function runCodexChatTurn(rawText, { images = [], prompt = null, carriesHandoff 
   writeCodexMeta(startedAt, { runId, startedAt, mode: 'chat', status: 'running' });
   // The one thing a restart cannot recover: an app-server turn dies with its
   // child. Recorded so the next boot can say so in one line instead of leaving
-  // him watching a bubble that will never move again.
+  // them watching a bubble that will never move again.
   st.codexTurnInFlight = { at: Date.now(), prompt: clip(oneLine(rawText), 120) };
   saveState();
 
@@ -4856,8 +4856,8 @@ function runCodexChatTurn(rawText, { images = [], prompt = null, carriesHandoff 
       if (outcome.failure === 'rate_limit') noteCodexWall();
       else if (outcome.status === 'finished') clearCodexWall();
       delete st.codexTurnInFlight;
-      // A /new mid-turn means he asked for a fresh chat: storing this thread now
-      // would resurrect the one he just cleared. saveState runs either way, so
+      // A /new mid-turn means they asked for a fresh chat: storing this thread now
+      // would resurrect the one they just cleared. saveState runs either way, so
       // the in-flight marker above really leaves the disk (rememberCodexThread
       // returns early when the id has not changed, and would not have saved).
       if ((st[genKey] || 0) === startGen) rememberCodexThread(threadId);
@@ -4984,7 +4984,7 @@ function runCodexChatTurn(rawText, { images = [], prompt = null, carriesHandoff 
     const client = codexAppServerClient;
     const forTurn = turnId;
     // The note goes up BEFORE the request, the same way the Claude lane pushes
-    // it the moment the bytes go into stdin: the owner sees his message land in
+    // it the moment the bytes go into stdin: the owner sees their message land in
     // the step list rather than a second later.
     const note = { kind: 'text', text: `📨 steered in: ${clip(String(text).replace(/\s+/g, ' '), 90)}` };
     run.steers.push({ ts: new Date().toISOString(), text: clip(String(text), STEER_RECORD_MAX) });
@@ -5083,9 +5083,9 @@ function runCodexChatTurn(rawText, { images = [], prompt = null, carriesHandoff 
       delete st.codexTurnInFlight;
       saveState();
       finalizeCodexMeta(startedAt, { status: run.stopped ? 'stopped' : 'failed', answer: 'app-server unavailable', tokens: null });
-      // A /stop that landed while the server was coming up means he does not
+      // A /stop that landed while the server was coming up means they do not
       // want this message run at all. Without this check the exec path claimed
-      // the lane again and ran it anyway, seconds after telling him it stopped
+      // the lane again and ran it anyway, seconds after telling them it stopped
       // (QA finding). The exec run would also own a lane the stopped run had
       // already released, so /stop could reach only one of the two.
       if (run.stopped) {
@@ -5204,9 +5204,9 @@ function runCodexChatTurn(rawText, { images = [], prompt = null, carriesHandoff 
  * One line naming BOTH reset clocks.
  *
  * Two walls is the one state where a single clock is actively misleading: told
- * only about Claude, he waits for a reset that will not help, and told only
- * about Codex he does the same. Whichever comes back first is what runs the
- * parked message, so both are what he needs.
+ * only about Claude, they wait for a reset that will not help, and told only
+ * about Codex they do the same. Whichever comes back first is what runs the
+ * parked message, so both are what they need.
  */
 function bothEnginesWalledLine() {
   return bothWalledLine({
@@ -5223,9 +5223,9 @@ function flushParkedWalledChats() {
   if (codexWalled() && claudeWalled()) return;
   const items = parkedWalledChats.splice(0);
   // The both-walled notice becomes this line rather than being followed by it:
-  // one message per event, and the one already on screen is the one he is
+  // one message per event, and the one already on screen is the one they are
   // looking at. Naming the engine that came back is the new fact, since it
-  // decides which of the two clocks he was watching mattered.
+  // decides which of the two clocks they were watching mattered.
   const back = claudeWalled() ? 'codex' : 'claude';
   // Leave the facts, then settle. If the sweep already noticed the wall lifted
   // it will have used them; if it has not, this settles the notice now with the
@@ -5460,7 +5460,7 @@ function loadSchedules() {
     }
     console.error('[bridge] schedules.json corrupt:', e.message);
     // Four lines of path and exception became two lines and a tap. The path is
-    // the part he would need only if he went looking, which is exactly what an
+    // the part they would need only if they went looking, which is exactly what an
     // expandable blockquote is for.
     sendError({
       glyph: '⚠️',
@@ -5597,7 +5597,7 @@ async function sendRich(text) {
 async function sendResult(text) {
   // THE ONE FUNNEL EVERY ENGINE'S ANSWER GOES THROUGH, which is why the dash
   // normalizer sits here and not in either runner. Claude has been trained off
-  // em dashes by his CLAUDE.md and Codex has not, and a two-engine bridge whose
+  // em dashes by their CLAUDE.md and Codex has not, and a two-engine bridge whose
   // replies read in two different registers is the thing this whole job is
   // about. Off by default in config.example.json; see dash-normalize.mjs for
   // what it will not touch (code, fences, URLs, the handoff markers).
@@ -5606,7 +5606,7 @@ async function sendResult(text) {
   // `::: details` becomes an expandable blockquote here, so a message can
   // collapse detail without giving up inline emphasis.
   const html = detailsToHtml(stripModeMarkers(text), mdToTelegramHtml);
-  for (const chunk of chunks(html, TG_MSG_LIMIT)) {
+  for (const chunk of chunks(html, TG_MSG_LIMIT, { closePre: true })) {
     try {
       await tg('sendMessage', { chat_id: CHAT_ID, text: chunk, parse_mode: 'HTML' });
     } catch (e) {
@@ -5756,7 +5756,7 @@ const BOT_COMMANDS = [
   { command: 'help', description: 'All commands' },
 ];
 // THE COMMAND TABLE AS THE PATH FILTER SEES IT. `/usage` in a shell command or
-// in a model's prose is a command he typed, not a file this turn touched, and
+// in a model's prose is a command they typed, not a file this turn touched, and
 // the switch confirmation counted eight of them as paths Codex could not reach.
 // Derived from the table rather than a second hand-kept list, so a command
 // added above is covered the day it lands. Telegram's registry uses
@@ -6081,8 +6081,8 @@ async function handleCommand(text, msg = null) {
                   : null,
               queued: l.queue.length,
             },
-            // A steer hint on a background worker is the command he would type;
-            // on the chat lane everything he types goes there by definition.
+            // A steer hint on a background worker is the command they would type;
+            // on the chat lane everything they type goes there by definition.
             { steerHint: l.isBg, showSteer: l.isBg || r.engine === 'codex' },
           );
         }
@@ -6214,7 +6214,7 @@ async function handleCommand(text, msg = null) {
               // No local allowlist and no list command in the CLI: an unknown
               // name comes back as Codex's own error on the first run, which is
               // more accurate than anything this daemon could assert. True and
-              // worth writing down; not worth two thirds of a view he opened to
+              // worth writing down; not worth two thirds of a view they opened to
               // check one word.
               detail: [
                 'Default means whatever the CLI picks.',
@@ -6319,8 +6319,11 @@ async function handleCommand(text, msg = null) {
         );
         return;
       }
-      // Codex is optional. Say so once, clearly, rather than spawning something
-      // that will fail a minute later with "spawn codex ENOENT".
+      // Codex is optional, and EVERY path below this line either spawns it or
+      // describes a run of it, so the binary check belongs once, here. Without
+      // it a missing binary produced a start notice, two artifact files and a
+      // `spawn ENOENT` report handed to the assistant as a full Claude turn
+      // spent summarising an absent binary.
       if (!CODEX_AVAILABLE) {
         await send(CODEX_MISSING_LINE, { markdown: false });
         return;
@@ -6347,14 +6350,6 @@ async function handleCommand(text, msg = null) {
           ].join('\n'),
           { markdown: false },
         );
-        return;
-      }
-      // EVERY remaining path here spawns Codex, so the binary check belongs
-      // once, above all of them. Without it a missing binary produced a start
-      // notice, two artifact files and a `spawn ENOENT` report handed to the assistant as a
-      // full Claude turn spent summarising an absent binary.
-      if (!CODEX_AVAILABLE) {
-        await send(CODEX_MISSING_LINE, { markdown: false });
         return;
       }
       // /codex review [<repo>] [vs <branch>] runs the CLI's own review harness over
@@ -6484,7 +6479,7 @@ async function handleCommand(text, msg = null) {
       await engineCommand(arg);
       return;
     }
-    // `/accounts` is the plural he actually types. It used to fall through to
+    // `/accounts` is the plural they actually types. It used to fall through to
     // Claude Code as an unknown command, which answered with a session instead
     // of a view.
     case '/accounts':
@@ -6930,7 +6925,7 @@ function resolveQueueAck(item, state) {
  * WHICH ENGINE, for one message about to run on one IDLE lane.
  *
  * `ignoreWall` is the difference between the owner's own message and internal
- * traffic. The rate-limit fallback is a degraded answer for a message he is
+ * traffic. The rate-limit fallback is a degraded answer for a message they are
  * sitting there waiting on; a worker report or a scheduled task diverted to a
  * thread-less Codex run would be handed to a model that has never heard of this
  * bridge, and parked for an assistant that has already been given it.
@@ -6964,7 +6959,7 @@ function engineForItem(lane, item) {
  * FIRST MESSAGE ONLY, and only on the chat lane: a background job is not this
  * conversation. Consumed here (handoffPending goes false) rather than at switch
  * time, because a switch the owner never followed up on should still be waiting
- * with its context when he does.
+ * with its context when they do.
  */
 function takeHandoffPrefix(engine) {
   const st = chatState();
@@ -6984,7 +6979,7 @@ function startResolvedRun(decision, lane, item, { laneBusy = false } = {}) {
   const text = item.text;
   // Internal payloads are NEVER refused: a handback with nowhere to go must
   // still reach the owner, which is what deliverWithoutClaude on the Claude
-  // path below does. Only a message he typed gets an error bubble.
+  // path below does. Only a message they typed gets an error bubble.
   if (decision.error) {
     if (item.priority) return 'fallthrough';
     send(decision.error === 'codex_missing' ? CODEX_MISSING_LINE : claudeMissingLine('This message'), {
@@ -7063,10 +7058,10 @@ function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallba
   const forcedEngine = p1.engine || p2.engine;
   const text = p2.text;
   const item = queueItem(text, { images, kinds, forcedEngine, priority, allowCodexFallback });
-  // BOTH ENGINES WALLED. Only for a message he typed: internal traffic ignores
+  // BOTH ENGINES WALLED. Only for a message they typed: internal traffic ignores
   // the wall by construction (see engineForItem). Spawning here produces two
   // failures a minute on a lane that cannot answer, so the message is parked
-  // and re-dispatched by itself when the first window comes back, and he is
+  // and re-dispatched by itself when the first window comes back, and they are
   // told BOTH clocks in one line rather than one of them twice.
   if (!priority && allowCodexFallback && !forcedEngine && codexWalled() && claudeWalled()) {
     if (parkedWalledChats.length < PARKED_WALLED_MAX) parkedWalledChats.push(item);
@@ -7156,13 +7151,13 @@ function dispatchPrompt(prompt, forcedLane, { priority = false, allowCodexFallba
  * Almost all of it is INTERNAL and priority: a finished worker's report, a
  * scheduled `run:` task, the parked-Codex catch-up. Those are written FOR the
  * assistant, and with no assistant the only useful thing left is to hand them
- * to the owner directly rather than spawn `claude` and answer him with
+ * to the owner directly rather than spawn `claude` and answer them with
  * "spawn claude ENOENT" (which is what happened to every background handback on
  * a Codex-first install). Bounded, because a worker report is a whole document.
  */
 const NO_CLAUDE_DIRECT_LIMIT = 3000;
 function deliverWithoutClaude(text) {
-  // Nobody is going to read this on his behalf, so a worker line waiting on
+  // Nobody is going to read this on their behalf, so a worker line waiting on
   // "reading it now…" is waiting for a turn that will never happen.
   settleReadingNotices();
   const body = String(text || '');
@@ -7231,8 +7226,8 @@ function flushGroup(grp) {
     if (grp.files.length) {
       // An ALBUM only. A single file gets no message: the run bubble's first
       // frame carries it, which costs nothing. Two or more is the case where
-      // the 2-second settle timer makes the gap visible, and he is owed a
-      // receipt for files he watched upload.
+      // the 2-second settle timer makes the gap visible, and they are owed a
+      // receipt for files they watched upload.
       const ack = attachmentAck(grp.kinds);
       if (ack) send(ack, { markdown: false }).catch(() => {});
       dispatchPrompt(buildMediaPrompt(grp.files, grp.caption), undefined, { allowCodexFallback: true, images: grp.paths, kinds: grp.kinds });
@@ -7265,7 +7260,7 @@ async function handleMedia(msg) {
       }
       if (heard) {
         await send(`🎙️ "${heard}"`, { markdown: false });
-        // Same flag as every other thing he sends: a voice note is him
+        // Same flag as every other thing they sends: a voice note is them
         // talking, so it runs on whichever engine the chat lane is set to.
         dispatchPrompt(caption ? `${caption}\n\n${heard}` : heard, undefined, { allowCodexFallback: true });
         return;
@@ -7508,7 +7503,7 @@ async function main() {
   //
   // Background workers are detached and survive us; an app-server chat turn is
   // the opposite by design. It ran on a child on OUR stdio pipes, so a restart
-  // ends it, and the bubble he was watching stops moving with no explanation.
+  // ends it, and the bubble they were watching stops moving with no explanation.
   // The THREAD survives (it lives on OpenAI's side and resumes on the next
   // message, measured), so this is one line about one lost turn, not a lost
   // conversation. There is no adoption path and there should not be: rejoining

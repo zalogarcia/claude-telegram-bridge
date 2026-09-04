@@ -372,7 +372,7 @@ export function capHandoff(h) {
  * RUNG 3: the handoff nobody had to ask a model for.
  *
  * Built from the chat ring, the cwd, and the sandbox in force. It is not a
- * summary and does not pretend to be one: the goal is his own last message,
+ * summary and does not pretend to be one: the goal is their own last message,
  * the "decisions" are the last few answers verbatim, and `open` is empty,
  * because a deterministic build genuinely does not know what is still open and
  * inventing one would be the only dishonest field in the object.

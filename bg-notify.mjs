@@ -102,7 +102,7 @@ export function outcomeGlyph(status) {
   if (s === 'finished') return '✅';
   if (s === 'failed') return '❌';
   // A job HE stopped is not a warning: 🛑 is the stop glyph everywhere else in
-  // this surface, and reading his own /stop as "something went wrong" is the
+  // this surface, and reading their own /stop as "something went wrong" is the
   // one outcome that should never look like a surprise.
   if (s === 'stopped') return '🛑';
   return '⚠️';
@@ -133,7 +133,7 @@ export function completionNotice({ lane, brief, status, elapsedSec } = {}) {
 //
 // One job used to produce FOUR objects in the chat and none of them ever
 // changed: the handoff notice, a separate completion ping, an unexplained
-// progress bubble while M read the report, and then M speaking. The notice in
+// progress bubble while the assistant read the report, and then the assistant speaking. The notice in
 // particular was six phone lines at minute 0 and the same six lines at minute
 // 39, so "still working" and "died twenty minutes ago" looked identical.
 //

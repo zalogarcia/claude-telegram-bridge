@@ -2,6 +2,81 @@
 
 All notable changes to Leash. Dates are release dates.
 
+## 1.5.0 (2026-09-04)
+
+**Codex stops being a rescue path and becomes a peer engine, and every message the daemon writes
+about itself gets one voice.**
+
+### An engine per lane
+
+- `/engine claude|codex` moves the chat lane; `/engine bg claude|codex` moves handed-off jobs. Bare
+  `/engine` prints both lanes, where each value came from, the Codex model and effort in force, and
+  the sandbox. `engine` in `config.json` sets the install default (`{"chat":..,"bg":..}`, or a bare
+  `"codex"` for both), so a Codex-first user never types the command.
+- A `codex:` or `claude:` prefix on any single message pins that one message, and
+  `bg.mjs --engine <name>` does the same for one background job. Precedence is resolved in one
+  place, so the notice, the handback and the run itself cannot disagree about why a job is where it
+  is.
+- **The daemon boots and serves with no `claude` binary on the machine.** `/status` says
+  `claude NOT INSTALLED`, account rotation never runs, and the handful of commands whose subject IS
+  a Claude session answer with one line instead of starting a session that cannot start.
+- `/model` on a Codex chat lane sets the CODEX model and says so. `/codex model`, `/codex effort`,
+  `/codex network on|off` and `/codex doctor` steer and check that engine directly.
+- The chat lane keeps ONE Codex thread per chat, so a follow-up continues the conversation instead
+  of paying to re-read the repo. `/new` starts a fresh one.
+
+### Switching engines without losing the conversation
+
+- Switching lanes used to drop the conversation: the incoming engine opened on "hello" while the
+  outgoing one held every decision that had been made. A bounded, redacted handoff (goal, decisions,
+  files touched, the open question) is now prepended to the incoming engine's first message as
+  untrusted DATA, inside explicit markers.
+- Five rungs, tried in order, so a switch never waits on an engine that may be walled: the engine
+  being left writes it in one short capture turn; failing that the on-disk chat ring (the last ten
+  turns of this chat, both engines, written by the daemon with no model call); then the ring without
+  tool detail; then the bare goal line; then a labelled "nothing recorded yet".
+- Everything stored and everything rendered goes through the same redaction pass `codex doctor`
+  output does, twice: once before it is written, once before it is injected.
+- The first Codex turn carrying a handoff runs with network access **off** by default
+  (`codexHandoffNetwork`). `/engine codex fresh` skips the handoff; `/new` clears it and the ring.
+
+### The Codex chat lane runs on `codex app-server`
+
+- A message typed mid-turn is **steered into the running turn**, with the same ack the Claude lane
+  sends. The bubble streams the tool steps, and the footer is `✅ Done · 12s · 3 steps`.
+- `/stop` is a `turn/interrupt` the model acknowledges, not a SIGTERM. One child serves the whole
+  daemon, so stopping one turn does not kill it.
+- Thread ids are unchanged: `thread/resume` takes ids created by `codex exec`, so nothing in
+  `state.json` needed migrating.
+- The fallback is intact: an older CLI, `codexAppServer: false`, or two child deaths in a minute,
+  and the lane runs one-shot on `codex exec` exactly as before, saying so once. Background jobs
+  always use `codex exec`, because a background worker must outlive this daemon.
+
+### One voice, and messages that finish what they start
+
+- Every message the daemon writes about itself now comes from one family with one house style:
+  icon, then label, then value; one fact per line; reference material behind an expandable
+  blockquote. `/help` is an index rather than a wall, and `/status`, `/usage`, `/context`, `/new`,
+  `/compact` and `/restart` all follow it.
+- **A wait is ONE message that edits itself to a terminal state.** A background job is one message
+  from dispatch, through a live line while it runs, to Done. `/restart` resolves the message it put
+  up. A limit wall counts itself down every five minutes and resolves the moment it lifts.
+  `progress: { background: false }` turns the live worker line off.
+- `style: { noDashes: true }` rewrites em and en dashes out of every outbound reply on both engines,
+  leaving code spans, fenced blocks and URLs alone. Off by default: the model keeps its own voice.
+- A worker's full report is written to disk before anything is capped, and the handback carries an
+  excerpt plus a pointer to the file, outside the untrusted-output markers.
+- The daemon's own name comes from `name` in `config.json` (default `Leash`).
+
+### Fixes
+
+- A fenced code block longer than one Telegram message no longer loses its formatting: the chunker
+  closes and reopens `<pre>` across the split.
+- `/account` and `/usage` render the Codex block again (an aliased import had left one call site on
+  the old name, which failed at call time and cached the account as unreadable).
+- `BRIDGE_<UPPER_SNAKE>` environment overrides now work for the object- and boolean-valued keys,
+  not just the scalar ones.
+
 ## 1.4.0 (2026-09-03)
 
 **A running background worker can be corrected, and there is a second engine behind it.**

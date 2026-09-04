@@ -508,7 +508,7 @@ export function classifyAppServerError(err) {
  * The queue line itself is the one dispatchPrompt already sends for every other
  * queued message ("Queued for the main lane (#1), runs on codex when its
  * current task finishes."); this is appended so the owner knows it was TRIED,
- * which is the difference between a bridge that queued his message and one that
+ * which is the difference between a bridge that queued their message and one that
  * ignored a steer.
  */
 export function steerRefusalNote(cls) {

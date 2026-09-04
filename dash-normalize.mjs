@@ -2,13 +2,13 @@
 // DASHES OUT OF THE PROSE, ON THE WAY TO THE PHONE
 //
 // The owner's standing rule for their own copy is no em dashes, anywhere, on any
-// channel. Claude has been trained off them by his CLAUDE.md; Codex has not,
+// channel. Claude has been trained off them by their CLAUDE.md; Codex has not,
 // and its replies arrive full of them. That is the whole reason this exists:
 // the bridge is now a two-engine product and the second engine writes in a
 // register the first one was told not to.
 //
 // It is a normalizer, not a lint. A lint tells you afterwards. This runs on the
-// outbound reply for BOTH engines, so the message he reads is already right.
+// outbound reply for BOTH engines, so the message they read is already right.
 //
 // The two characters appear here ONLY as \u2014 and \u2013 escapes, never as
 // literals, so this file passes the same no-dash check every other file in the

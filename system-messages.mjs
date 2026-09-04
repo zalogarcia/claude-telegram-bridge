@@ -160,7 +160,7 @@ export function bootAnnouncePlan({
  *
  * One message either way, ticking at 3s, because on a wait this short a stale
  * clock is the entire complaint. It is edited into the report itself, so the
- * answer lands where he is already looking.
+ * answer lands where they are already looking.
  */
 export function fetchingLine(label, elapsedSec = 0) {
   const el = Number.isFinite(elapsedSec) && elapsedSec > 0 ? ` · ${fmtElapsed(Math.round(elapsedSec))}` : '';
@@ -189,19 +189,19 @@ export function fetchFailedLine(what, error) {
 // is correct and load bearing (the bg-salvage instruction exists because ~50
 // minutes of finished compute was thrown away twice) and must NOT be trimmed
 // for readability. But it means the only thing the owner sees is a progress bubble
-// starting with no message of his above it, and on the dead-worker path he sees
+// starting with no message of their above it, and on the dead-worker path they see
 // it after having heard nothing for 41 minutes.
 //
 // So the rule is a second message, not a shorter first one: when the daemon
 // dispatches work into the chat lane by itself, it also sends the owner one factual
-// line saying why. The judgement stays M's; the system message only states what
+// line saying why. The judgement stays the assistant's; the system message only states what
 // happened.
 
 /**
  * A worker died without reporting.
  *
- * Two phases of one message: what happened, then that M has picked it up. The
- * OUTCOME is deliberately not here. It is M's to say in her own words once she
+ * Two phases of one message: what happened, then that the assistant has picked it up. The
+ * OUTCOME is deliberately not here. It is the assistant's to say in its own words once it
  * has read the salvage, so this line stops after saying who is holding it.
  */
 export function deadWorkerLine({ lane = 'a worker', elapsedSec = null, title = '', phase = 'checking', name = 'Leash' } = {}) {
@@ -247,7 +247,7 @@ const ERROR_BODY_MAX = 3200;
 export function classifyClaudeFailure(text) {
   const s = String(text ?? '');
   // Credit BEFORE auth: "credit balance is too low" is a billing state, not a
-  // login problem, and telling him to re-authenticate would send him to the
+  // login problem, and telling them to re-authenticate would send them to the
   // wrong screen.
   if (/credit balance|insufficient (?:credit|funds)|billing|payment required|\b402\b/i.test(s)) return 'credit';
   if (/\b401\b|unauthorized|unauthenticated|invalid[ _-]?api[ _-]?key|authentication|not (?:logged|signed) in|oauth|token (?:has )?expired/i.test(s)) {
@@ -330,7 +330,7 @@ export function firstMeaningfulLine(text) {
 // ---------------------------------------------------------------------------
 
 /**
- * The command index, grouped by what he is trying to DO.
+ * The command index, grouped by what they are trying to DO.
  *
  * /help was 4,700 characters, 26 paragraphs, chunked into two Telegram messages
  * and roughly 120 phone lines: a reference document delivered as a wall. This
@@ -339,7 +339,7 @@ export function firstMeaningfulLine(text) {
  *
  * Exported as data rather than a string so a test can assert that every command
  * the daemon reserves appears in exactly one group. A command that stops being
- * listed is a command he can no longer discover, and that is the failure mode
+ * listed is a command they can no longer discover, and that is the failure mode
  * an index has that a wall does not.
  */
 // Telegram's per-message cap is 4,096 and the index plus the tags need room.
@@ -455,8 +455,8 @@ export function workerStatusBlock(
     note = null,
     queued = 0,
   } = {},
-  // The chat lane has no steer line: everything he types goes into it by
-  // definition, so "steerable" there is a fact about nothing he can act on.
+  // The chat lane has no steer line: everything they type goes into it by
+  // definition, so "steerable" there is a fact about nothing they can act on.
   { steerHint = false, showSteer = true } = {},
 ) {
   const glyph = state === 'running' ? '🟢' : state === 'wrapping up' ? '🟡' : '⚪';
@@ -480,7 +480,7 @@ export function workerStatusBlock(
  * `/steer` with no arguments.
  *
  * Two lines of usage and then the same worker blocks /status shows, instead of
- * `psTable`. The command he is being taught is the one he can type here.
+ * `psTable`. The command they are being taught is the one they can type here.
  */
 export function steerUsage(workers = []) {
   const list = Array.isArray(workers) ? workers : [];
@@ -541,7 +541,7 @@ export function queueRunningNow({ engine = 'codex', reason = null } = {}) {
   ].join('\n');
 }
 
-/** ACK-03. The queue is full; the two things he can do about it. */
+/** ACK-03. The queue is full; the two things they can do about it. */
 export function queueFull({ lane = 'main', max = 5 } = {}) {
   return [`⏳ ${lane} queue is full (${max})`, `Wait, or /stop ${lane} to clear it.`].join('\n');
 }
@@ -600,7 +600,7 @@ export function idleLaneLine({ icon = '🌙', lane = 'Background', queued = 0, f
 }
 
 // ---------------------------------------------------------------------------
-// LIMIT WALLS: a clock that stays true no matter when he reads it
+// LIMIT WALLS: a clock that stays true no matter when they read it
 // ---------------------------------------------------------------------------
 //
 // The old wall notice said "Earliest reset: 3h 12m from now" once and then went
@@ -651,8 +651,8 @@ export function limitWallResolved({ clock = null, codexAnswered = 0 } = {}) {
 /**
  * The swap could not happen (ACC-02).
  *
- * Which account he is still on is the fact the old version left out, and it is
- * the one that decides what he does next.
+ * Which account they are still on is the fact the old version left out, and it is
+ * the one that decides what they do next.
  */
 export function swapFailedLine({ error = '', account = '' } = {}) {
   const lines = ['⚠️ Session limit hit, swap failed'];
@@ -666,9 +666,9 @@ export function swapFailedLine({ error = '', account = '' } = {}) {
  * Both engines walled (BG-07), the same object one level up.
  *
  * Two walls is the one state where a single clock actively misleads: told only
- * about Claude he waits for a reset that will not help, and told only about
- * Codex he does the same. Whichever comes back first runs the parked message,
- * so both clocks are what he needs, on one line, glyph-labelled.
+ * about Claude they wait for a reset that will not help, and told only about
+ * Codex they do the same. Whichever comes back first runs the parked message,
+ * so both clocks are what they need, on one line, glyph-labelled.
  */
 export function bothWalledLine({ claudeAt = null, codexAt = null, claudeAvailable = true } = {}) {
   const claudeBit = claudeAvailable
@@ -782,7 +782,7 @@ export function attachmentNoun(kinds = []) {
  * A single file gets no message: the bubble's first frame carries it instead
  * (see attachmentFrameNote), which costs nothing and adds no object to the
  * chat. Two or more is the case where the settle timer makes the gap visible,
- * and the reader is owed a receipt for files he watched upload.
+ * and the reader is owed a receipt for files they watched upload.
  */
 export function attachmentAck(kinds = []) {
   if (!kinds || kinds.length < 2) return null;
@@ -801,7 +801,7 @@ export function attachmentFrameNote(kinds = []) {
 //
 // `/codex network` was six lines, one of them 150 characters, explaining how it
 // differs from /yolo. The distinction is real and worth writing down; it is not
-// worth five sixths of a view he opens to check one word. Same for model and
+// worth five sixths of a view they open to check one word. Same for model and
 // effort: the value line, the set line, and everything explanatory behind the
 // blockquote /help already uses.
 
@@ -827,8 +827,8 @@ export function codexSubView({ icon = '🧠', label = '', value = '', now = null
  *
  * Three problems in one line. `.local` is noise. The `/help` hint is redundant,
  * because the command menu is registered on boot and is one tap away. And
- * "Claude bridge" is a name that is about to be wrong: this daemon is called M
- * in every other string it sends, and the public build is Leash.
+ * "Claude bridge" is a name that is about to be wrong: this daemon is named in
+ * config.json and says that name in every other string it sends.
  *
  * The worker line is genuinely new information rather than decoration: a
  * restart over two multi-hour jobs reported nothing at all, which is the
@@ -846,8 +846,8 @@ export function bootAnnounceLine({ name = 'Leash', host = '', workers = 0 } = {}
 // ---------------------------------------------------------------------------
 //
 // account-usage.mjs is a SHARED module: scripts/check-shared.sh requires it to
-// be byte-identical with the public repo, so these three changes cannot be made
-// at source. They are the smallest possible post-pass over its output, and
+// be byte-identical with its sibling repo, so these three changes cannot be
+// made at source. They are the smallest possible post-pass over its output, and
 // deliberately conservative: an anchored pattern per change, so a rewording on
 // the other side of the shared boundary makes this a no-op rather than a
 // corrupted view.
@@ -861,7 +861,7 @@ export function bootAnnounceLine({ name = 'Leash', host = '', workers = 0 } = {}
  *    markers for one job, and the emoji is the one that scans.
  * 2. Drop the em dash subtitle. It cannot be fixed at source and the outbound
  *    normalizer would turn it into a comma.
- * 3. Drop /usage's footer. The timezone is his own, and the swap hint is
+ * 3. Drop /usage's footer. The timezone is their own, and the swap hint is
  *    already on the other view, one line from the top.
  */
 export function tightenAccountView(text) {

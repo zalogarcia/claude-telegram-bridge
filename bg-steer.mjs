@@ -276,7 +276,7 @@ export function steerAckLine(res, { verbose = true, timeZone = null } = {}) {
  * then who, then what to do instead.
  *
  * The run id and the pid are deliberately gone. They are unreadable and
- * untypeable on a phone, and the thing he would do with them, steer again, is
+ * untypeable on a phone, and the thing they would do with them, steer again, is
  * `/steer <lane>`. `bg.mjs ps` still prints both.
  */
 function phoneAckLine(res, { timeZone = null } = {}) {
