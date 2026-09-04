@@ -1,0 +1,74 @@
+{
+ "spaced": {
+  "in": "We shipped it — and it worked.",
+  "out": "We shipped it, and it worked."
+ },
+ "unspaced": {
+  "in": "We shipped it—and it worked.",
+  "out": "We shipped it, and it worked."
+ },
+ "trailing": {
+  "in": "I checked the log —",
+  "out": "I checked the log."
+ },
+ "two": {
+  "in": "The build — the slow one — finally passed.",
+  "out": "The build, the slow one, finally passed."
+ },
+ "range": {
+  "in": "It takes 3–5 minutes.",
+  "out": "It takes 3 to 5 minutes."
+ },
+ "enSpaced": {
+  "in": "the gateway – worker path",
+  "out": "the gateway - worker path"
+ },
+ "enTight": {
+  "in": "the gateway–worker path",
+  "out": "the gateway-worker path"
+ },
+ "punct": {
+  "in": "Done—, then we shipped.",
+  "out": "Done, then we shipped."
+ },
+ "codeSpan": {
+  "in": "Run `npm run build — watch` next — it is quick.",
+  "out": "Run `npm run build — watch` next, it is quick.",
+  "mustKeep": "`npm run build — watch`"
+ },
+ "fence": {
+  "in": "Here — the script:\n```bash\necho a — b\necho 3–5\n```\nThat is it — done.",
+  "out": "Here, the script:\n```bash\necho a — b\necho 3–5\n```\nThat is it, done.",
+  "mustKeep": "echo a — b"
+ },
+ "url": {
+  "in": "See https://example.test/a—b?x=1–2 for the details — it is short.",
+  "out": "See https://example.test/a—b?x=1–2 for the details, it is short.",
+  "mustKeep": "https://example.test/a—b?x=1–2"
+ },
+ "markers": {
+  "in": "<<<HANDOFF_START>>>\nGoal: ship it — today\n<<<HANDOFF_END>>>"
+ },
+ "html": {
+  "in": "<b>bold — here</b> and prose — here"
+ },
+ "dashBeforeCode": {
+  "in": "the flag is —`--json` and that is all",
+  "out": "the flag is, `--json` and that is all"
+ },
+ "brokenFence": {
+  "in": "```bash\necho a — b\nno closing fence, and text after"
+ },
+ "multiline": {
+  "in": "Line one—\nLine two, still here.",
+  "out": "Line one.\nLine two, still here."
+ },
+ "paragraphs": {
+  "in": "para one—\n\npara two",
+  "out": "para one.\n\npara two"
+ },
+ "leading": {
+  "in": "Line one\n— a dash-led aside\nLine three",
+  "out": "Line one\na dash-led aside\nLine three"
+ }
+}

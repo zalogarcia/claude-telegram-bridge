@@ -67,12 +67,17 @@ while :; do
   # "idle" that would restart over a live run.
   DPID=$(ps aux | grep '[b]ridge\.mjs' | awk '{print $2}' | head -1)
   [ -z "$DPID" ] && break                     # daemon down — restart boots it
-  kids=$(ps -axo ppid= | awk -v p="$DPID" '$1 == p' | wc -l | tr -d ' ')
+  # The Codex app-server is a PERSISTENT child of the daemon (one per boot,
+  # respawned by the next boot; it reads JSON-RPC on stdin and exits on EOF).
+  # It is never work in flight, so it is excluded from both probes. Without
+  # this the chat lane never reads as idle once the app-server lane is up: a
+  # restart waits on it forever instead of finding the lane idle.
+  child_pids=$(ps -axo ppid=,pid=,command= | awk -v p="$DPID" '$1 == p && $0 !~ /codex app-server/ {print $2}')
+  kids=$(printf '%s\n' "$child_pids" | grep -c .)
   [ "$kids" = "0" ] && break                  # idle — safe to restart
   if [ "$ALLOW_BG" = "1" ]; then
     # Every live child is a detached background worker: the chat lane is idle,
     # and the workers outlive us. Restart now rather than in four hours.
-    child_pids=$(ps -axo ppid=,pid= | awk -v p="$DPID" '$1 == p {print $2}')
     if [ "$(only_bg_children "$child_pids")" = "1" ]; then
       echo "[safe-restart] --allow-bg: chat lane idle, $kids detached worker(s) running, restarting over them (they survive; they lose steerability)" >&2
       break
