@@ -46,6 +46,8 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 | 🗂️ **Named, resumable chats** | `/rename` a conversation, `/chats` to list them, `/resume` to switch back. `/compact` summarizes a long one into a fresh chat. |
 | 🌙 **Unlimited background workers** | Long jobs (`/goal`, `/autopilot`, test suites) run in *separate* Claude sessions. If a worker is busy, another spawns — parallel, never queued behind each other. |
 | ➡️ **Mid-task steering** | Message while a task is running and it goes *into* the running task, exactly like typing mid-turn in Claude Code. |
+| 🎯 **Steer a background worker** | `/steer latest <one more instruction>` writes into a *running* worker, so it keeps the context it has already built. Correcting a job no longer means killing it. |
+| 🧠 **A second engine** | OpenAI Codex, if you have it: `/codex <question>`, `/codex review` over a diff, and while every Claude account is rate limited it keeps background work moving instead of stalling. Optional, billed separately. [Details.](#codex-second-engine-and-fallback) |
 | 📊 **Live progress** | Watch tool calls stream in as it works — including subagent activity, indented. |
 | 🎙️ **Voice notes** | Talk instead of typing. Transcribed with Whisper, run as a prompt. |
 | 📎 **Files & photos** | Send a screenshot with "why does this look broken?" — images, PDFs, code, anything ≤20MB. |
@@ -158,8 +160,10 @@ does the message queue instead.
 | `/context` | Session context size, your 5h and weekly plan limits (% used + time left), and token/cost totals ([ccusage](https://github.com/ryoppippi/ccusage)). The limits need [one line in your statusline](docs/statusline.md); everything else works out of the box |
 | `/account` | Which Claude account is live + each enrolled account's headroom, with one-tap swap buttons. `/account <name>` swaps; `/account capture <name>` enrolls the current login ([multi-account setup](docs/multi-account.md)) |
 | `/usage` | Live 5h-block and weekly plan usage for **every** enrolled account — which one still has headroom |
-| `/status` | Directory, session, model, and a live block per lane: elapsed, steps, current task, latest action |
-| `/stop [bg\|all]` | Kill the running task and clear that lane's queue |
+| `/status` | Directory, session, model, and a live block per lane: elapsed, steps, current task, latest action. Names each worker's run id and whether it can still be steered |
+| `/steer <target> <text>` | Write one more instruction into a **running** background worker. Target is a lane (`bg2`), a run id, a pid, or `latest`. `/steer` alone lists what is running |
+| `/codex <question>` | Ask OpenAI Codex, read-only, in the current directory. `/codex review [<repo>] [vs <branch>]` runs its review harness over a diff; `/codex on\|off` toggles the rate-limit fallback |
+| `/stop [bg\|codex\|all]` | Kill the running task and clear that lane's queue. `codex` reaches a Codex run, which belongs to no lane |
 | `/restart` | Restart the daemon remotely |
 | `/logs` | Tail the daemon log |
 | `/remind …` | `daily HH:MM <text>` · `once [YYYY-MM-DD] HH:MM <text>` · `in 90m <text>` |
@@ -226,6 +230,117 @@ that account by hand, then `/account capture <name>` it again.
 Full detail — what a swap actually writes, the MCP-token guarantee, the drift
 guard, and every failure mode: [docs/multi-account.md](docs/multi-account.md).
 
+## Steering a running worker
+
+A background worker used to be unreachable the moment it was dispatched. Its
+stdin closed at spawn, so the only way to change its instructions was to kill it
+and re-dispatch with a new brief, throwing away a context that had already read
+half your repo.
+
+Workers now hold stdin open, and there are two doors onto it:
+
+```bash
+/steer latest skip the browser step, the harness covers it   # from Telegram
+node bg.mjs steer bg2 "skip the browser step"                # from a terminal
+node bg.mjs steer latest --file ./correction.md              # anything longer
+node bg.mjs ps                                               # what is running
+```
+
+The target is a lane name (`bg`, `bg2`), a run id (`bg2-1788453512237`), a pid,
+or `latest` for the most recently started worker. `bg.mjs ps` prints the table
+that names all of them:
+
+```
+RUNID             LANE  PID    ELAPSED  STEPS  STEER  SENT  ENGINE  TITLE
+bg-1788453512237  bg    41022  18m      64     yes    1     claude  Port the second engine
+bg2-1788453999999 bg2   41190  4m       9      no     0     claude  Rebuild the search index
+```
+
+**`STEER: no` is the honest answer, not a bug.** A worker that outlived a daemon
+restart is still running, but the new daemon only tails its log and holds no
+pipe to it; and a run whose result is already in has nothing left to steer. Both
+report `no` rather than accepting a write that would go nowhere.
+
+The text arrives framed, so the worker knows it is a mid-run instruction and not
+a replacement brief. Without that framing the observed failure is a worker that
+treats the new sentence as a new task and abandons the job it was halfway
+through. Whatever was steered in comes back in the worker's report under a
+`STEERED IN` block, so you can see what shaped the answer.
+
+Use `steer` when the brief is still right and you are adding or correcting an
+instruction. Kill and re-dispatch only when the brief itself was wrong, because
+that throws the warm context away.
+
+**The socket is local and unauthenticated.** It is a filesystem socket
+(`steer.sock`) next to `bridge.mjs`, with no network listener of any kind,
+reachable by exactly the processes that could already read this directory, and
+that directory holds your bot token, so anything that can steer a worker could
+already do worse. It carries two operations, `steer` and `ps`; it cannot start,
+stop or kill anything. If that trade is wrong for your machine, tighten the
+directory's permissions rather than weakening the framing.
+
+<a name="codex-second-engine-and-fallback"></a>
+
+## Codex: second engine and fallback
+
+Leash runs on Claude. When every Claude account you have is rate limited, that
+is an *account* limit, not a machine limit, and if you also have OpenAI's
+[Codex CLI](https://github.com/openai/codex) installed, there is a second engine
+sitting right there on separate billing.
+
+**Codex is optional.** Without the binary, every path below answers with one
+line saying it is not installed and nothing else changes.
+
+```
+/codex <question>                    ask Codex, read-only, in the current directory
+/codex review                        its review harness over the uncommitted diff here
+/codex review <repo>                 same, in <default working dir>/<repo>
+/codex review <repo> vs main         review that repo against a base branch
+/codex on | off                      the automatic fallback (default: on)
+/codex                               usage, the fallback setting, and any run in flight
+```
+
+From a terminal, a whole job can go to it instead of Claude:
+
+```bash
+node bg.mjs --engine codex --file ./brief.md
+node bg.mjs "codex: review the last commit"     # same thing, inline prefix
+```
+
+A Codex run shows up everywhere a background worker does: in `/status`, in
+`bg.mjs ps` with `ENGINE: codex`, in the run registry, and `/stop codex` kills
+it. It is never steerable: Codex reads its prompt once, from stdin, and never
+again.
+
+**The fallback.** While every enrolled Claude account is rate limited:
+
+- a background job handed over with no engine preference runs on Codex rather
+  than waiting hours for a reset (a Claude *slash command* like `/autopilot` is
+  the exception and still waits, because Codex has no idea what those are);
+- a message you type in the chat gets a Codex answer prefixed
+  `[Codex fallback, Claude limited until HH:MM]`, instead of silence;
+- once the wall lifts, the assistant is handed those question/answer pairs as
+  context with an explicit instruction *not* to answer them a second time.
+
+`/codex off` turns that half off; on-demand `/codex` still works.
+
+The two engines never wake each other: a Codex failure can never mark a Claude
+account limited, swap one, or re-fire anything on Claude, and Claude's own
+limit handling never spawns Codex. That is what stops the fallback looping.
+
+**Billing.** Codex bills *your own* OpenAI login (a ChatGPT subscription or an
+API key, whichever `codex login` set up), and nothing about it touches your
+Anthropic plan. `/account` shows that account below the Claude ones: which login,
+which plan, both rate-limit windows with their reset clocks, the credit balance,
+and what Codex has cost you today and over the last seven days. To switch which
+login it uses, run `codex login` in a terminal; Leash never reads, prints or
+forwards those credentials: the `codex` child simply inherits your environment
+and finds its own auth in `~/.codex/auth.json`.
+
+Configuration, all optional, in `config.json`: `codexBin` (default `codex`),
+`codexTimeoutMs` (default 30 minutes; `0` disarms the deadline), `codexModel`
+(default: whatever the CLI itself uses).
+
 ## Security
 
 **Read this before installing.** This gives a Telegram chat the ability to run
@@ -267,6 +382,8 @@ systemctl --user restart com.claude-telegram-bridge
 
 # restart without killing an in-flight run — waits for idle first
 # (use this after editing bridge.mjs while a task might be running)
+# add --allow-bg to restart as soon as the CHAT lane is idle: background
+# workers survive a restart, they only lose steerability until they finish
 ./safe-restart.sh
 
 # stop for real — the watchdog revives it otherwise
@@ -283,6 +400,14 @@ node usage-limits.test.mjs       # plan limits, token counts, context windows
 node rich-format.test.mjs        # Bot API 10.2 rich blocks
 node detached-workers.test.mjs   # a worker must survive its daemon being killed
 node watchdog.test.mjs           # dead workers get reaped, live ones don't
+node bg-steer.test.mjs           # steering: target resolution, framing, the real CLI
+node bg-lane-rules.test.mjs      # the preamble bg.mjs prepends, and stripping it back off
+node bg-codex.test.mjs           # the second engine's pure half: argv, routing, parsing
+node bg-codex-wiring.test.mjs    # the real runCodex against a fake codex binary
+node codex-account.test.mjs      # the Codex block on /account
+
+# probes (no Telegram, no daemon, no model spend)
+node scripts/probes/steer-probe.mjs   # a steer, end to end, into a fake worker
 
 # check the modules shared with the private sibling repo have not drifted
 BRIDGE_SIBLING_REPO=/path/to/sibling ./scripts/check-shared.sh

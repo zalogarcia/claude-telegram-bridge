@@ -2,6 +2,72 @@
 
 All notable changes to Leash. Dates are release dates.
 
+## 1.4.0 (2026-09-03)
+
+**A running background worker can be corrected, and there is a second engine behind it.**
+
+### Steering a running worker
+
+Background workers used to close stdin at spawn, which made a dispatched job unreachable: the only
+way to change its instructions was to kill it and re-dispatch, throwing away a context that had
+already read the repo. Workers now hold stdin open for their whole run.
+
+- `/steer <lane|runId|pid|latest> <text>` from Telegram, and `node bg.mjs steer <target> "<text>"`
+  (or `--file <path>`) from a terminal, write one more instruction into a running worker.
+- `node bg.mjs ps` prints what is running: run id, lane, pid, elapsed, steps, whether it can still
+  be steered, how many steers it has taken, which engine, and the job title.
+- The text arrives framed as a mid-run instruction, so a worker folds it into the job it is doing
+  instead of treating it as a replacement brief. Whatever was steered in comes back in the report
+  under a `STEERED IN` block, outside the untrusted-output markers, because it is the bridge's own
+  record rather than the worker's claim about itself.
+- `/status` now names each worker's run id and says whether it is steerable. A worker that survived
+  a daemon restart is running but unreachable (the new daemon tails its log and holds no pipe), and
+  those now appear in `/status` instead of the lane list reading "idle" over a multi-hour job.
+- Briefs handed over through `bg.mjs` now carry a short LANE RULES preamble stating the facts a
+  headless worker otherwise learns by being blocked, including that a steer may arrive mid-run. The
+  daemon strips it back off before showing a brief in a notice, `ps` or `/status`.
+- `safe-restart.sh --allow-bg` restarts as soon as the chat lane is idle rather than waiting hours
+  for background work. The workers survive; they lose steerability until they finish.
+- The socket is a local, unauthenticated filesystem socket (`steer.sock`) next to `bridge.mjs`,
+  carrying two operations, `steer` and `ps`. It cannot start, stop or kill anything.
+
+### Codex: a second engine, and a fallback for a walled account
+
+Optional, and off the shelf: if OpenAI's Codex CLI is installed, Leash can run work on it. Without
+the binary every path below answers with one line saying so, and nothing else changes.
+
+- `/codex <question>` asks it read-only in the current directory; `/codex review [<repo>] [vs
+  <branch>]` runs its own review harness over a diff; `/codex on|off` toggles the fallback.
+- `node bg.mjs --engine codex --file <brief>`, or a `codex:` prefix, sends a whole job to it.
+- While **every** enrolled Claude account is rate limited, a background job with no engine
+  preference runs on Codex rather than waiting for the reset, and a chat message gets a Codex answer
+  prefixed `[Codex fallback, Claude limited until HH:MM]` instead of silence. Claude slash commands
+  still wait, because Codex cannot run one. Once the wall lifts those pairs are handed to the
+  assistant as context, with an instruction not to answer them again.
+- A Codex failure can never mark a Claude account limited, swap one, or re-fire anything on Claude,
+  and Claude's limit handling never spawns Codex. The fallback cannot loop.
+- Codex runs are registered, detached and file-backed exactly like a worker: they appear in
+  `/status` and `bg.mjs ps` with `ENGINE: codex`, survive a daemon restart with their deadline
+  re-armed, and `/stop codex` kills one. They are never steerable, because Codex reads its prompt
+  once from stdin and never again.
+- `/account` (and the new `/accounts` alias) shows the Codex account below the Claude ones: which
+  login, the plan, both rate-limit windows with reset clocks, the credit balance, and what Codex has
+  cost today and over the last seven days. Nothing in that path reads, prints or forwards a
+  credential; `codex` finds its own auth in `~/.codex/auth.json`.
+- Billing is your own OpenAI login, a ChatGPT subscription or an API key, and is entirely separate
+  from your Anthropic plan.
+- New optional config keys: `codexBin`, `codexTimeoutMs` (default 30 minutes, `0` disarms the
+  deadline), `codexModel`. `install.sh` checks for the binary and only warns when it is absent.
+
+### Under the hood
+
+- Every run, background included, now gives its stdin pipe back on both terminal handlers, so a
+  long-lived daemon cannot leak one file descriptor per run it has ever started.
+- New modules, each with its own suite: `bg-steer.mjs`, `bg-lane-rules.mjs`, `bg-codex.mjs`,
+  `codex-account.mjs`. Suite total is 484 assertions across 11 files to 739 across 16, plus a probe
+  (`scripts/probes/steer-probe.mjs`) that drives a steer end to end into a fake worker with no model
+  spend.
+
 ## 1.3.0 (2026-09-03)
 
 **Renamed to Leash.** The project keeps every behaviour it had; only the name changes. "Claude

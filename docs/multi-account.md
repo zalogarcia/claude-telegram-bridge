@@ -81,6 +81,36 @@ re-checks every 60 seconds and re-asserts the intended account when that
 happens — and when it finds credentials it cannot identify (say you ran
 `claude /login` by hand), it never overwrites them: your login always wins.
 
+### When every account is limited: the Codex fallback
+
+The pause above is the honest end of what a *Claude* multi-account setup can do:
+every subscription you own is walled, so there is nothing left to rotate to, and
+work waits for the earliest reset.
+
+If you also have OpenAI's Codex CLI installed, Leash has one more move, on
+billing that has nothing to do with Anthropic. While the pause is in effect:
+
+- a background job handed over with no engine preference runs on **Codex**
+  instead of waiting for the reset (a Claude slash command like `/autopilot` is
+  the exception and still waits, because Codex cannot run one);
+- a message you type gets a Codex answer prefixed
+  `[Codex fallback, Claude limited until HH:MM]`, so a walled account is a
+  degraded answer rather than silence;
+- when the wall lifts, the assistant is handed those question and answer pairs as
+  context, with an explicit instruction not to answer them a second time.
+
+The two engines are deliberately isolated from each other: a Codex failure can
+never mark a Claude account limited, swap one, or re-fire anything on Claude,
+and the Claude rotation above never spawns Codex. That is what stops a failing
+job bouncing between them.
+
+`/codex off` disables the automatic half (on-demand `/codex` still works);
+`/codex on` re-enables it; `/account` shows the Codex login, its own two
+rate-limit windows and what it has cost, below the Claude rows. Codex is
+entirely optional: with no binary installed, none of this exists and everything
+above is unchanged. Full grammar in the
+[README](../README.md#codex-second-engine-and-fallback).
+
 ## The sharpest edge: refresh-token rotation
 
 When an access token is refreshed, Anthropic **rotates the refresh token**. The
