@@ -53,6 +53,12 @@
 
 import { fmtPercent, fmtResetClock, fmtResetLeft, usageBar } from './account-usage.mjs';
 import { fmtAge } from './progress-render.mjs';
+// ONE framing for the app-server protocol, not two. This module spoke it first
+// (for the rate-limit read) and codex-appserver.mjs now speaks it for every
+// chat turn; the reader lives there, beside the request builders it belongs to,
+// and is imported here so a protocol that ever grows a Content-Length header
+// changes in one place.
+import { createJsonLineReader, frameMessage, initializeRequest } from './codex-appserver.mjs';
 
 // The claim object OpenAI hangs the ChatGPT subscription facts off. A URL as a
 // key is normal for a namespaced JWT claim and is matched literally.
@@ -267,7 +273,6 @@ export async function fetchCodexRateLimits({ spawnImpl, bin = 'codex', timeoutMs
       return;
     }
     let settled = false;
-    let buf = '';
     let asked = false;
     const stop = (out) => {
       if (settled) return;
@@ -293,7 +298,7 @@ export async function fetchCodexRateLimits({ spawnImpl, bin = 'codex', timeoutMs
     const timer = setTimeout(() => stop({ ok: false, error: 'codex app-server timed out' }), timeoutMs);
     const write = (msg) => {
       try {
-        child.stdin.write(JSON.stringify(msg) + '\n');
+        child.stdin.write(frameMessage(msg));
       } catch (e) {
         stop({ ok: false, error: `codex app-server write failed: ${e.message}` });
       }
@@ -302,41 +307,24 @@ export async function fetchCodexRateLimits({ spawnImpl, bin = 'codex', timeoutMs
     child.on('error', (e) => stop({ ok: false, error: `codex app-server: ${e.message}` }));
     child.on('close', () => stop({ ok: false, error: 'codex app-server closed without answering' }));
     child.stderr?.on('data', () => {}); // drained so a chatty binary cannot fill its pipe and block
-    child.stdout?.on('data', (d) => {
-      buf += String(d);
-      // Newline-delimited JSON-RPC. The tail after the last newline is a partial
-      // line and stays in the buffer.
-      const lines = buf.split('\n');
-      buf = lines.pop() ?? '';
-      for (const line of lines) {
-        const s = line.trim();
-        if (!s) continue;
-        let msg;
-        try {
-          msg = JSON.parse(s);
-        } catch {
-          continue; // a log line on stdout is not a protocol error
-        }
-        if (msg.id === 1 && !asked) {
-          asked = true;
-          write({ jsonrpc: '2.0', id: 2, method: 'account/rateLimits/read', params: {} });
-        } else if (msg.id === 2) {
-          if (msg.error) {
-            stop({ ok: false, error: `codex rate limits: ${msg.error.message || 'refused'}` });
-            return;
-          }
-          const usage = normalizeCodexRateLimits(msg.result);
-          stop(usage ? { ok: true, usage } : { ok: false, error: 'codex returned no rate-limit windows' });
+    // Newline-delimited JSON-RPC, read by the shared reader: a partial tail
+    // stays buffered until its newline turns up, and a plain log line on stdout
+    // is ignored rather than treated as a protocol error.
+    const reader = createJsonLineReader((msg) => {
+      if (msg.id === 1 && !asked) {
+        asked = true;
+        write({ jsonrpc: '2.0', id: 2, method: 'account/rateLimits/read', params: {} });
+      } else if (msg.id === 2) {
+        if (msg.error) {
+          stop({ ok: false, error: `codex rate limits: ${msg.error.message || 'refused'}` });
           return;
         }
+        const usage = normalizeCodexRateLimits(msg.result);
+        stop(usage ? { ok: true, usage } : { ok: false, error: 'codex returned no rate-limit windows' });
       }
     });
-    write({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { clientInfo: { name: 'claude-telegram-bridge', version: '1.0.0' } },
-    });
+    child.stdout?.on('data', (d) => reader.push(d));
+    write(initializeRequest(1));
   });
 }
 
@@ -523,20 +511,40 @@ function codexWindowLine(w, { now, timeZone }) {
  *   API-key login     -> there are no plan windows to show, and that is not a fault
  *   windows unread    -> the login is fine, the read failed; the identity still shows
  */
+// "model default · effort medium". Null means the CLI's own default on both
+// counts, which is what a fresh install reads, so the word is "default" rather
+// than a blank or a guessed model name we would then have to keep current.
+export function codexSettingsLine(settings) {
+  if (!settings) return null;
+  const model = settings.model || 'default';
+  const effort = settings.effort || 'default';
+  return `model ${model} · effort ${effort}`;
+}
+
 export function codexAccountBlock(
-  { identity = null, usage = null, usageError = null, fallbackOn = true, tally = null } = {},
+  { identity = null, usage = null, usageError = null, fallbackOn = true, tally = null, settings = null } = {},
   { now = Date.now(), timeZone = 'UTC' } = {},
 ) {
-  const out = ['🧠 **Codex** (OpenAI, billed separately)'];
+  // No bold: it sits on top of an emoji, which is two markers for one job, and
+  // the emoji is the one that scans. The same tightening the Claude halves of
+  // /account and /usage get, applied here at source because this module is not
+  // shared with the public repo.
+  const out = ['🧠 Codex · OpenAI, billed separately'];
   const id = identity || { state: 'none' };
   const fallback = `fallback ${fallbackOn ? 'on' : 'off'}`;
+  // WHAT THE NEXT RUN WILL USE. Shown on every branch, including the ones that
+  // return early, because "why did that answer come back so thin" is a question
+  // about the effort setting and it is otherwise invisible anywhere but /engine.
+  const settingsLine = codexSettingsLine(settings);
 
   if (id.state === 'none') {
     out.push('• not signed in · run `codex login` in a terminal', `   ${fallback}`);
+    if (settingsLine) out.push(`   ${settingsLine}`);
     return out.join('\n');
   }
   if (id.state === 'broken') {
     out.push(`• ⚠️ ${id.error || 'the codex login could not be read'}`, `   ${fallback}`);
+    if (settingsLine) out.push(`   ${settingsLine}`);
     return out.join('\n');
   }
   if (id.state === 'apikey') {
@@ -545,6 +553,7 @@ export function codexAccountBlock(
     const lastLine = codexLastRunLine(tally?.last, { now });
     if (lastLine) out.push(`   ${lastLine}`);
     if (spend) out.push(`   ${spend}`);
+    if (settingsLine) out.push(`   ${settingsLine}`);
     return out.join('\n');
   }
 
@@ -569,6 +578,7 @@ export function codexAccountBlock(
   if (lastLine) out.push(`   ${lastLine}`);
   const spend = codexSpendLine(tally);
   if (spend) out.push(`   ${spend}`);
+  if (settingsLine) out.push(`   ${settingsLine}`);
   out.push(`   ${fallback} · /codex <question> · /codex review [repo]`);
   return out.join('\n');
 }

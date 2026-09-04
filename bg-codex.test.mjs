@@ -15,7 +15,7 @@ import {
   CODEX_BIN,
   CODEX_LANE,
   CODEX_MODES,
-  CODEX_PREFIX_RE,
+  ENGINE_PREFIX_RE,
   PARKED_ANSWER_MAX,
   PARKED_PROMPT_MAX,
   buildCodexArgs,
@@ -239,7 +239,7 @@ t('bg.mjs carries the SAME prefix shape', () => {
   // dirs), so its copy is asserted here rather than shared, exactly like
   // TARGET_SHAPE in bg-steer.test.mjs.
   const src = readFileSync(path.join(DIR, 'bg.mjs'), 'utf8');
-  ok(src.includes(CODEX_PREFIX_RE.source), `bg.mjs lost the prefix regex ${CODEX_PREFIX_RE.source}`);
+  ok(src.includes(ENGINE_PREFIX_RE.source), `bg.mjs lost the prefix regex ${ENGINE_PREFIX_RE.source}`);
 });
 
 // ---------------------------------------------------------------------------
@@ -569,7 +569,7 @@ t('the handback says why it was on Codex when it was a fallback', () => {
 t('the degraded chat answer is prefixed with the wall and the clock', () => {
   eq(
     codexFallbackPrefix(Date.parse('2026-09-03T21:40:00Z'), { timeZone: 'America/New_York' }),
-    '[Codex fallback, Claude limited until 17:40]',
+    '🧠 Codex fallback · Claude back at 17:40',
   );
   ok(codexFallbackPrefix(0).includes('Codex fallback'), 'still prefixed with no known reset');
 });

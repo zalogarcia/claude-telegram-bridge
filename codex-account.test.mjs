@@ -30,6 +30,7 @@ import {
   readCodexIdentity,
   readCodexRuns,
   tallyCodexRuns,
+  codexSettingsLine,
 } from './codex-account.mjs';
 
 let pass = 0;
@@ -550,7 +551,7 @@ t('the full block renders exactly as it will be read on the phone', () => {
   eq(
     text,
     [
-      '🧠 **Codex** (OpenAI, billed separately)',
+      '🧠 Codex · OpenAI, billed separately',
       '• `owner@example.com` · ChatGPT Plus · signed in with ChatGPT',
       '   `5h ███░░░░░░░  31%` resets 11:09pm · 3h 39m',
       '   `wk █░░░░░░░░░   7%` resets Thu 11:42am · 6d 16h',
@@ -577,7 +578,7 @@ t('the email travels in a code span so Telegram cannot linkify it', () => {
 
 t('no auth file: one line saying what to do about it', () => {
   const text = codexAccountBlock({ identity: readCodexIdentity(null), fallbackOn: true }, { now: NOW, timeZone: TZ });
-  eq(text, ['🧠 **Codex** (OpenAI, billed separately)', '• not signed in · run `codex login` in a terminal', '   fallback on'].join('\n'));
+  eq(text, ['🧠 Codex · OpenAI, billed separately', '• not signed in · run `codex login` in a terminal', '   fallback on'].join('\n'));
 });
 
 t('an unparseable auth file reads differently from a missing one', () => {
@@ -716,6 +717,47 @@ await t('a reader that throws degrades the view instead of failing the reply', a
   const snap = await acct.snapshot();
   eq(snap.identity.state, 'broken');
   ok(codexAccountBlock(snap, { now: NOW, timeZone: TZ }).startsWith('🧠'));
+});
+
+// ---------------------------------------------------------------------------
+// What the next Codex run will actually use
+// ---------------------------------------------------------------------------
+
+t('★ the block says the model and effort a Codex run would start with', () => {
+  const line = codexSettingsLine({ model: 'gpt-5.6-sol', effort: 'high' });
+  eq(line, 'model gpt-5.6-sol · effort high');
+});
+
+t('unset reads as "default", not as a blank or a guessed model name', () => {
+  eq(codexSettingsLine({ model: null, effort: null }), 'model default · effort default');
+  eq(codexSettingsLine({}), 'model default · effort default');
+});
+
+t('no settings at all means no line, rather than a line saying nothing', () => {
+  eq(codexSettingsLine(null), null);
+  eq(codexSettingsLine(undefined), null);
+});
+
+t('★ the settings line appears on EVERY identity state, including the early returns', () => {
+  // "why did that answer come back so thin" is a question about the effort
+  // setting, and it is invisible anywhere but /engine without this.
+  const settings = { model: 'o3', effort: 'low' };
+  for (const identity of [
+    { state: 'none' },
+    { state: 'broken', error: 'unreadable' },
+    { state: 'apikey' },
+    { state: 'chatgpt', email: 'a@b.c', planLabel: 'ChatGPT Plus', loginMode: 'ChatGPT' },
+  ]) {
+    const block = codexAccountBlock({ identity, settings }, { now: Date.now(), timeZone: 'UTC' });
+    ok(block.includes('model o3 · effort low'), `${identity.state}: ${block}`);
+  }
+});
+
+t('and a block built without settings is byte-identical to before', () => {
+  const identity = { state: 'chatgpt', email: 'a@b.c', planLabel: 'ChatGPT Plus', loginMode: 'ChatGPT' };
+  const block = codexAccountBlock({ identity }, { now: Date.now(), timeZone: 'UTC' });
+  ok(!block.includes('model '), block);
+  ok(block.includes('fallback on'), block);
 });
 
 console.log(`\n${pass} passed, ${failures.length} failed\n`);

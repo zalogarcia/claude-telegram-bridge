@@ -5,6 +5,7 @@
 //   node bg.mjs --file ./brief.md                   (preferred for real briefs)
 //   node bg.mjs --engine codex --file ./brief.md    (run it on OpenAI Codex, not Claude)
 //   node bg.mjs "codex: review the last commit"     (same thing, inline prefix)
+//   node bg.mjs --engine claude --file /tmp/b.md    (pin to Claude on a Codex-first install)
 //   node bg.mjs steer <lane|runId|pid|latest> "one more instruction"
 //   node bg.mjs steer <lane|runId|pid|latest> --file ./steer.md
 //   node bg.mjs ps                                  (what is running, right now)
@@ -163,10 +164,16 @@ if (argv[0] === 'steer' && TARGET_SHAPE.test(String(argv[1] ?? '').trim())) {
 // has to know the engine before it composes the handoff notice, and a marker
 // buried in prose would be one more thing to parse out of a brief.
 //
-// KEEP IN SYNC with CODEX_PREFIX_RE in bg-codex.mjs (bg-codex.test.mjs asserts
-// the two copies match). This file imports node built-ins only, on purpose.
+// A `claude:` prefix (and `--engine claude`) is the mirror image, and it earns
+// its keep on a Codex-first install: with `engine.bg: "codex"` in config.json
+// EVERY handed-off job runs on Codex, and pinning one back to Claude has to be
+// as cheap as the other direction.
+//
+// KEEP IN SYNC with ENGINE_PREFIX_RE in engine-state.mjs (bg-codex.test.mjs
+// asserts the two copies match). This file imports node built-ins only, on
+// purpose.
 // ---------------------------------------------------------------------------
-const CODEX_PREFIX_RE = /^\s*codex:\s*/i;
+const ENGINE_PREFIX_RE = /^\s*(codex|claude):\s*/i;
 let engine = null;
 const dispatchArgs = argv.slice();
 const engineFlag = dispatchArgs.indexOf('--engine');
@@ -182,19 +189,21 @@ if (engineFlag !== -1) {
 
 let text = payload(dispatchArgs, 'usage: node bg.mjs [--engine codex] --file <path-to-brief>');
 
-// `codex: do the thing` is the engine sibling of the `bg:` prefix, for when
-// typing a flag is more friction than the job is worth.
-if (CODEX_PREFIX_RE.test(text)) {
-  engine = engine || 'codex';
-  text = text.replace(CODEX_PREFIX_RE, '');
+// `codex: do the thing` / `claude: do the thing` are the engine siblings of the
+// `bg:` prefix, for when typing a flag is more friction than the job is worth.
+// An explicit --engine still wins: the flag is the more deliberate of the two.
+const enginePrefix = text.match(ENGINE_PREFIX_RE);
+if (enginePrefix) {
+  engine = engine || enginePrefix[1].toLowerCase();
+  text = text.replace(ENGINE_PREFIX_RE, '');
 }
 
 if (!text) {
   console.error(
     [
       'usage: node bg.mjs "<task>"   |   node bg.mjs --file <path-to-brief>',
-      '       node bg.mjs --engine codex --file <path>   (OpenAI Codex instead of Claude)',
-      '       node bg.mjs "codex: <task>"                (same, inline prefix)',
+      '       node bg.mjs --engine codex|claude --file <path>   (pick the engine for this job)',
+      '       node bg.mjs "codex: <task>" | "claude: <task>"    (same, inline prefix)',
       '       node bg.mjs steer <lane|runId|pid|latest> "<text>" | --file <path>',
       '       node bg.mjs ps',
     ].join('\n'),
@@ -274,4 +283,6 @@ if (lastErr) {
   process.exit(1);
 }
 
-console.log(`handed to ${engine === 'codex' ? 'the CODEX lane' : 'background lane'} (${pending} pending): ${text.slice(0, 80)}`);
+console.log(
+  `handed to ${engine === 'codex' ? 'the CODEX lane' : engine === 'claude' ? 'the background lane (pinned to Claude)' : 'background lane'} (${pending} pending): ${text.slice(0, 80)}`,
+);
