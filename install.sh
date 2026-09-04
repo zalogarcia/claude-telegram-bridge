@@ -140,6 +140,7 @@ else
 {
   "botToken": "$TOKEN",
   "chatId": "$CHAT_ID",
+  "name": "Leash",
   "defaultCwd": "$DEFAULT_CWD",
   "claudeBin": "$CLAUDE_BIN",
   "model": "",
@@ -148,7 +149,12 @@ else
   "ownerName": "the owner",
   "timeoutMs": 1800000,
   "bgTimeoutMs": 28800000,
-  "staleSec": 3600
+  "staleSec": 3600,
+  "engine": { "chat": "claude", "bg": "claude" },
+  "codexAppServer": "true",
+  "handoffCaptureTurn": true,
+  "style": { "noDashes": false },
+  "progress": { "background": true }
 }
 EOF
   chmod 600 "$CONFIG"

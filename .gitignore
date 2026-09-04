@@ -7,6 +7,8 @@ state.json
 schedules.json
 bg-queue.json
 bg-results.jsonl
+chat-ring.jsonl
+bg-reports/
 bg-inflight.json
 steer.sock
 runs/

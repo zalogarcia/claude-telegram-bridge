@@ -2,6 +2,7 @@
   "botToken": "123456789:AAF-your-token-from-BotFather",
   "chatId": "123456789",
 
+  "name": "Leash",
   "defaultCwd": "",
   "claudeBin": "",
 
@@ -15,9 +16,19 @@
   "bgTimeoutMs": 28800000,
   "staleSec": 3600,
 
+  "engine": { "chat": "claude", "bg": "claude" },
+
   "codexBin": "codex",
   "codexTimeoutMs": 1800000,
   "codexModel": "",
+  "codexEffort": "",
+  "codexAppServer": "true",
+  "codexHandoffNetwork": false,
+
+  "handoffCaptureTurn": true,
+
+  "style": { "noDashes": false },
+  "progress": { "background": true },
 
   "bgTailMs": 300,
   "reattachPollMs": 5000,
@@ -25,19 +36,27 @@
   "inflightFile": "",
 
   "_comments": {
+    "name": "What the daemon calls itself in /help, /status and the boot announce. Default 'Leash'.",
     "defaultCwd": "Where sessions start. Empty = ~/dev if it exists, else $HOME.",
     "claudeBin": "Path to the claude CLI. Empty = auto-detect.",
     "model": "Empty = whatever your claude CLI defaults to. Or e.g. 'opus', 'sonnet', 'haiku'.",
     "effort": "Empty = CLI default. Or 'low' | 'medium' | 'high' | 'xhigh'.",
     "yolo": "'true' passes --dangerously-skip-permissions (headless runs can't answer prompts). 'false' uses acceptEdits.",
     "ownerName": "What the assistant calls you when reporting on background work.",
-    "ownerTz": "IANA timezone for /account, /usage and /status reset clocks (e.g. 'America/New_York'). Empty = this machine's local zone.",
-    "timeoutMs": "Kill a CHAT-lane task after this long. Default 30 minutes — you're waiting on the reply.",
-    "bgTimeoutMs": "Kill a BACKGROUND worker after this long. Default 8 hours — that lane is for hour-scale jobs.",
+    "ownerTz": "IANA timezone for /account, /usage and /status reset clocks (e.g. 'Europe/Lisbon'). Empty = this machine's local zone.",
+    "timeoutMs": "Kill a CHAT-lane task after this long. Default 30 minutes, because you're waiting on the reply.",
+    "bgTimeoutMs": "Kill a BACKGROUND worker after this long. Default 8 hours, because that lane is for hour-scale jobs.",
     "staleSec": "Ignore messages older than this (e.g. queued while the machine slept). Default 1 hour.",
-    "codexBin": "The OpenAI Codex CLI, for the second engine (/codex and the rate-limit fallback). Optional: with no binary installed every Codex path says so and nothing else changes.",
+    "engine": "Which engine each lane runs on by default: {\"chat\":\"claude\",\"bg\":\"claude\"}. A bare string ('codex') sets both. /engine changes it for this chat at runtime, and a 'codex:' or 'claude:' prefix pins one message.",
+    "codexBin": "The OpenAI Codex CLI, for the second engine (/codex, /engine codex and the rate-limit fallback). Optional: with no binary installed every Codex path says so and nothing else changes.",
     "codexTimeoutMs": "Kill a Codex run after this long. Default 30 minutes. 0 disarms the deadline. A Codex run is billed per token and cannot be steered, so an unbounded one is worse than a killed one.",
-    "codexModel": "Empty = whatever the codex CLI itself defaults to.",
+    "codexModel": "Empty = whatever the codex CLI itself defaults to. /codex model changes it for this chat.",
+    "codexEffort": "Empty = CLI default. Or 'low' | 'medium' | 'high' | 'xhigh'. /codex effort changes it for this chat.",
+    "codexAppServer": "'true' runs the Codex CHAT lane on `codex app-server`, which is what gives it mid-turn steering, streamed tool steps and a real /stop. 'false' pins it to one-shot `codex exec`. Background Codex jobs always use exec, because they must outlive this daemon.",
+    "codexHandoffNetwork": "false runs the FIRST Codex turn that carries a handoff from the other engine with network access off. Model-written text entering a workspace-write run is the one exfiltration surface the handoff adds; set true only if you need that turn online.",
+    "handoffCaptureTurn": "true lets the engine you are LEAVING spend one short turn writing the handoff (goal, decisions, files, open question) before the switch. false always builds it from the on-disk chat ring instead, which never needs a model to be up.",
+    "style": "{\"noDashes\": true} rewrites em and en dashes out of every outbound reply, on both engines, leaving code spans, fenced blocks and URLs alone. Default false: the model keeps its own voice.",
+    "progress": "{\"background\": false} turns off the live 🌙 line a background worker keeps on screen from dispatch to done. Default true.",
     "bgTailMs": "How often the daemon polls a detached worker's log file, in ms. This replaces the stdout pipe. Default 300.",
     "reattachPollMs": "How often to check whether a worker that outlived a daemon restart has exited, in ms. Default 5000.",
     "runLogMaxAgeDays": "Delete background run logs older than this at startup. Logs still named by a live worker are kept. Default 7.",
