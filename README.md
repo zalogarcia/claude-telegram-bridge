@@ -62,8 +62,8 @@ of Node that long-polls the Telegram Bot API and pipes messages into
 or Linux (systemd). A Telegram account.
 
 ```bash
-git clone https://github.com/zalogarcia/claude-telegram-bridge.git ~/claude-telegram-bridge
-cd ~/claude-telegram-bridge
+git clone https://github.com/zalogarcia/leash.git ~/leash
+cd ~/leash
 ./install.sh
 ```
 
@@ -664,7 +664,7 @@ BRIDGE_SIBLING_REPO=/path/to/sibling ./scripts/check-shared.sh
 **Internal names still say `claude-telegram-bridge`.** The product is called
 Leash, but the on-disk identifiers are deliberately unchanged in this release:
 the service label `com.claude-telegram-bridge`, the default clone directory
-`~/claude-telegram-bridge`, the log file name, the `BRIDGE_*` environment
+`~/leash`, the log file name, the `BRIDGE_*` environment
 variables, the `bridge.mjs` entry point, the `config.json` / `accounts.json` /
 `bg-inflight.json` state files and the `.bridge-paused` pause sentinel.
 Renaming those would break every existing install, so they migrate in a later

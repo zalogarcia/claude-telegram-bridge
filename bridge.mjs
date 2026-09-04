@@ -7,7 +7,7 @@
 // Run as a daemon:   node bridge.mjs
 // One-shot test:     node bridge.mjs --selftest "Reply with exactly: OK"
 //
-// https://github.com/zalogarcia/claude-telegram-bridge — MIT
+// https://github.com/zalogarcia/leash — MIT
 
 // `spawn` is aliased because the word already reads as "spawn a worker"
 // everywhere in this file, and the ONE thing it is used for here is the short
