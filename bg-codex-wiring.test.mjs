@@ -1460,6 +1460,13 @@ export const setWall = (until, opts = {}) => {
 const codexInstalled = () => installed;
 const codexFallbackOn = () => fallback;
 const CODEX_MISSING_LINE = 'Codex is not installed';
+// The card resolvers, by the module-binding names production uses: the drain
+// reads them out of scope to put the model on the worker card, and a harness
+// missing them makes the notice throw and eats the notification. Fixed values,
+// because this file is about WHICH ENGINE the drain picks; the card just has to
+// carry the right one's model.
+const claudeCardSettings = () => ({ model: 'opus', effort: 'xhigh' });
+const codexCardSettings = () => ({ model: 'gpt-6-astra', effort: 'high' });
 // The REAL resolver over this harness's state: a mirror of engineFor would keep
 // agreeing with itself after engine-state.mjs changed.
 export let ENGINE_CFG = {};
@@ -1567,6 +1574,16 @@ DRAIN.drainBgHandoff();
 await t('and a clean brief gets no warning at all', () => {
   eq(DRAIN.CODEX.length, 1);
   ok(!/does not have/.test(DRAIN.SENT.join('\n')), DRAIN.SENT.join('\n'));
+});
+
+await t('★ and the card names the CODEX model, not the Claude pool pin', () => {
+  // The two branches of this drain reach for two different resolvers. Crossing
+  // them would put "opus · xhigh" on the head of a job Codex is running, on the
+  // one surface whose job is saying which engine is doing the work.
+  const head = DRAIN.SENT.join('\n').split('\n')[0];
+  ok(head.startsWith('🧠 '), head);
+  ok(head.includes('· gpt-6-astra · high'), head);
+  ok(!/opus|xhigh/.test(head), head);
 });
 
 DRAIN.reset();

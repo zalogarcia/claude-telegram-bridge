@@ -19,6 +19,7 @@ import {
   claudeMissingLine,
   codexChatSandbox,
   codexSettings,
+  codexTomlModel,
   engineDefaults,
   engineStatusLine,
   engineView,
@@ -860,6 +861,37 @@ t('★ no shape this command can produce carries an em or en dash', () => {
     ok(!dashes.test(line), line);
   }
   ok(!dashes.test(engineView({ chat: { engineChat: 'codex' }, codexUsage: { percent: 99, label: '5h', resetsAt: '03:15' } })));
+});
+
+// ---------------------------------------------------------------------------
+// codexTomlModel: the CLI's own default, for a surface that has to NAME it.
+//
+// Only consulted when /codex model and config.json both resolve to null. The
+// bridge omits --model then, so what the run actually uses is whatever
+// ~/.codex/config.toml says, and the worker card would otherwise print
+// "default" over a machine that has pinned a model for two months.
+// ---------------------------------------------------------------------------
+
+t('codexTomlModel: reads a top-level model, single or double quoted', () => {
+  eq(codexTomlModel('model = "gpt-6-astra"'), 'gpt-6-astra');
+  eq(codexTomlModel("model = 'gpt-6-astra'"), 'gpt-6-astra');
+  eq(codexTomlModel('# a comment\n\nmodel = "gpt-6-astra"  # inline\n'), 'gpt-6-astra');
+});
+
+t('★ codexTomlModel stops at the first section header', () => {
+  // A `model` under [profiles.x] or [mcp_servers.y] is a DIFFERENT key. Printing
+  // it on a card would be a confident wrong answer, which is worse than
+  // "default" on the one line whose job is naming the engine.
+  eq(codexTomlModel('[profiles.fast]\nmodel = "gpt-5.6-sol"'), null);
+  eq(codexTomlModel('model = "top"\n[profiles.fast]\nmodel = "nested"'), 'top', 'the top-level one still wins');
+});
+
+t('codexTomlModel: nothing to read is null, never a throw', () => {
+  eq(codexTomlModel(''), null);
+  eq(codexTomlModel(null), null);
+  eq(codexTomlModel(undefined), null);
+  eq(codexTomlModel('model = ""'), null, 'an empty value is not a model name');
+  eq(codexTomlModel('project_doc_max_bytes = 262144\n[mcp_servers.x]\nurl = "y"'), null, 'the real config on this Mac');
 });
 
 console.log(`\n${pass} passed, ${failures.length} failed\n`);

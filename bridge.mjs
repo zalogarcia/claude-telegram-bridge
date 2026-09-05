@@ -226,6 +226,7 @@ import {
   claudeMissingLine,
   codexChatSandbox,
   codexSettings,
+  codexTomlModel,
   engineDefaults,
   engineStatusLine,
   engineView,
@@ -1315,6 +1316,17 @@ function runClaude(
         // re-attaches by tailing this file (reattachLiveWorkers), instead of
         // announcing a perfectly healthy worker as dead.
         log: logPath,
+        // What this worker was SPAWNED on. Persisted because a re-attached
+        // worker is the one case where nothing in the process knows: the pipe
+        // is gone and only the log survives, and today's pool pin is not
+        // necessarily the one that started a worker from before the restart.
+        // It reaches the descriptor and the `bg.mjs ps` socket payload; the
+        // live CARD cannot be rebuilt after a restart (its message_id died with
+        // the old process), so there is no card to show it on, which is why a
+        // record written before this field existed leaves it undefined and
+        // every surface then shows nothing rather than a guess.
+        model: st.model || DEFAULT_MODEL || null,
+        effort: DEFAULT_EFFORT || null,
       });
     }
     run.terminate = () => {
@@ -2191,6 +2203,11 @@ function bgWorkerDescriptors() {
         engine: rec.engine || 'claude', // absent = written before the second engine existed
         mode: rec.mode || null,
         cwd: rec.cwd || null,
+        // From the spawn record or not at all. This worker survived a restart,
+        // so the daemon holding it never chose its model; printing the CURRENT
+        // pin here would be a guess dressed as a fact.
+        model: rec.model || null,
+        effort: rec.effort || null,
         run: null,
       };
     });
@@ -3371,6 +3388,42 @@ const bgLaneEngine = () => settledEngine('bg');
 const codexSettingsNow = () => codexSettings(engineArgs());
 
 /**
+ * The model and effort a Codex run will ACTUALLY use, for a surface that has to
+ * name them (the worker card). Same resolution order the run itself takes:
+ * /codex model, then config.json codexModel, and then the two answers the run
+ * never has to give because it simply omits `--model`: the CLI's own
+ * `~/.codex/config.toml`, and failing that the literal word "default", which is
+ * what /account and /engine already print for an unset model. The file is read
+ * per dispatch rather than cached: it is a few KB, dispatch is not a hot path,
+ * and a cache would hand back a model the CLI stopped using.
+ */
+/**
+ * The model and effort a CLAUDE run will actually use, for the same surface.
+ *
+ * There is no separate background pin here: every lane runs the chat lane's
+ * /model over the config default, which is exactly what runClaude puts in argv.
+ * Either can be EMPTY, meaning the daemon passes no `--model` and the `claude`
+ * CLI picks; the word for that is the same "default" the Codex half prints for
+ * an unset model, so one card reads the same way whichever engine drew it.
+ */
+function claudeCardSettings() {
+  return { model: chatState().model || DEFAULT_MODEL || 'default', effort: DEFAULT_EFFORT || 'default' };
+}
+
+function codexCardSettings() {
+  const { model, effort } = codexSettingsNow();
+  let toml = null;
+  if (!model && !CODEX_MODEL) {
+    try {
+      toml = codexTomlModel(readFileSync(path.join(HOME, '.codex', 'config.toml'), 'utf8'));
+    } catch {
+      /* no config, or unreadable: "default" is the honest answer */
+    }
+  }
+  return { model: model || CODEX_MODEL || toml || 'default', effort: effort || 'default' };
+}
+
+/**
  * The ChatGPT window worth naming right now, or null.
  *
  * The cached snapshot only: peek() never spawns, so /engine and the switch
@@ -4234,6 +4287,10 @@ function runCodex(rawText, { mode = 'ask', cwd = null, reviewScope = 'uncommitte
       engine: 'codex', // read by the reaper, by ps, and by the re-attach path
       mode,
       cwd: runCwd,
+      // Resolved at spawn for the same reason the Claude record carries it: a
+      // re-attached run holds no handle, and /codex model can have moved since.
+      model: codexModel || CODEX_MODEL || null,
+      effort: codexEffort || null,
     });
   }
   child.stdin.on('error', () => {}); // EPIPE from a dead child must not crash the daemon
@@ -5686,6 +5743,10 @@ function drainBgHandoff() {
             queued,
             engine: 'codex',
             engineNote: codexReasonText(decision.reason, decision.pausedUntil, { timeZone: OWNER_TZ }),
+            // WHAT THIS RUN IS ON, resolved the same way the run itself
+            // resolves it. "Codex" alone does not answer "why is this one
+            // thinking harder than that one".
+            ...codexCardSettings(),
           },
           // A background Codex job has no in-process step stream, so its line
           // carries the clock and nothing it would have to invent.
@@ -5751,6 +5812,9 @@ function drainBgHandoff() {
           brief: text,
           running: active,
           queued,
+          // The same two values runClaude puts in argv, so the card cannot
+          // claim a model the worker is not on.
+          ...claudeCardSettings(),
         },
         // Read through the lane, not a captured `run`: /stop and a restart both
         // replace it, and a stale reference would tick a dead job forever.
@@ -5847,6 +5911,14 @@ function checkSchedules() {
         // throw while composing must never cost the job.
         const schedLane = getBgLane();
         dispatchPrompt(s.text, schedLane, { priority: true });
+        // WHETHER THIS JOB IS EVEN ON CLAUDE. dispatchPrompt re-resolves the
+        // engine on every route in, so a bg lane settled to Codex (or a machine
+        // with no `claude` at all) sends this job to runCodex and leaves
+        // lane.current null. Stamping the pool pin on the card regardless would
+        // print "opus · xhigh" over a job Codex is running, on the one line
+        // whose whole purpose is naming the engine. Null lane means the daemon
+        // cannot say what it is on, so it says nothing.
+        const onClaudeLane = Boolean(schedLane.current);
         // The same live line every other worker gets. A daily 8am job used to
         // run for twenty minutes behind ONE static sentence, because this path
         // never went near handoffNotice. ⏰ stays in the head so a scheduled job
@@ -5862,6 +5934,9 @@ function checkSchedules() {
             scheduleId: s.id,
             scheduleWhen: s.kind === 'daily' ? `daily ${s.at}` : null,
             running: bgLanes.filter((l) => l.current || l.queue.length || l.finishing).length,
+            // A scheduled job that DID land on a bg lane runs on the pool's pin
+            // like every other worker, so it carries it too.
+            ...(onClaudeLane ? claudeCardSettings() : {}),
           },
           () =>
             schedRun && schedLane.current === schedRun

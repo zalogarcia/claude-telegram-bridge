@@ -286,6 +286,32 @@ export function codexSettings({ chat = {}, config = {} } = {}) {
 }
 
 /**
+ * The model line out of the Codex CLI's OWN config, `~/.codex/config.toml`.
+ *
+ * Only used where a surface has to NAME the model a run will use and
+ * codexSettings resolved to null: the bridge never passes `--model` then, so
+ * the CLI picks, and the CLI picks this. Takes the file's TEXT rather than a
+ * path so it stays pure and testable.
+ *
+ * Deliberately not a TOML parser. It reads exactly one thing, a top-level
+ * `model = "..."`, and stops at the first `[section]` header, because a
+ * `model` under `[profiles.x]` or `[mcp_servers.y]` is a different key and
+ * printing it on a card would be a confident wrong answer. No key, an empty
+ * value or unreadable text all return null, which every caller renders as the
+ * literal word "default".
+ */
+export function codexTomlModel(text) {
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim();
+    if (line.startsWith('[')) break; // into a section: no longer top level
+    if (!line || line.startsWith('#')) continue;
+    const m = /^model\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$/.exec(line);
+    if (m) return (m[1] ?? m[2] ?? '').trim() || null;
+  }
+  return null;
+}
+
+/**
  * THE CHAT LANE'S SANDBOX, from the same /yolo switch Claude's runs use.
  *
  * yolo on  -> workspace-write, network on. The Codex equivalent of Claude's

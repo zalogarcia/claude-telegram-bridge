@@ -162,6 +162,30 @@ export const WORKER_TICK_MS = 15_000;
 /** When nothing changed. An idle worker edits at most once a minute. */
 export const WORKER_IDLE_MS = 60_000;
 
+// The head is ONE scannable row and the only line allowed past LINE_MAX, so it
+// carries its own ceiling. Past this the repo drops to its own line rather than
+// the model: "which engine, which model, at what effort" is the question the
+// head was widened to answer, and the repo is already in the brief title under
+// it. 60 is where his phone stops showing a third fact on one row.
+export const HEAD_MAX = 60;
+
+/**
+ * The model and effort slot of the head.
+ *
+ * Effort rides WITH a model and never alone: `🌙 bg · delta-agents · xhigh`
+ * reads as if xhigh were the model. Both are omitted whenever the caller does
+ * not know them (a worker re-attached by log after a restart holds no spawn
+ * record), because a guessed model on the line whose job is naming the engine
+ * is worse than a line that stays quiet. `null`, `undefined` and blanks all
+ * take the quiet branch.
+ */
+function engineBits(model, effort) {
+  const m = clip(oneLine(model ?? ''), 24).trim();
+  if (!m) return [];
+  const e = clip(oneLine(effort ?? ''), 12).trim();
+  return e ? [m, e] : [m];
+}
+
 /**
  * One line for all four phases of a background job.
  *
@@ -184,23 +208,47 @@ export function workerLine({
   status = 'finished',
   engine = 'claude',
   engineNote = null,
+  model = null,
+  effort = null,
   runId = null,
   scheduleId = null,
   scheduleWhen = null,
 } = {}) {
   const isCodex = String(engine).toLowerCase() === 'codex';
   const terminal = phase === 'done' || phase === 'reading';
-  // A scheduled job keeps ⏰ in the head so it is still identifiable as one,
-  // and its head names the schedule rather than a repo it did not choose.
   // A scheduled job keeps ⏰ WHILE IT RUNS so it is identifiable as one, and
   // resolves to the same ✅/❌ head as every other worker: a failed daily job
   // that still reads "⏰ #3 · daily 08:00" carries its outcome nowhere the eye
   // lands.
-  const head = scheduleId
-    ? `${terminal ? outcomeGlyph(status) : '⏰'} #${scheduleId}${scheduleWhen ? ` · ${scheduleWhen}` : ''}`
-    : `${terminal ? outcomeGlyph(status) : isCodex ? '🧠' : '🌙'} ${lane || 'background'}${repo ? ` · ${repo}` : ''}`;
+  //
+  // WHICH ENGINE IS DOING THE WORK, model and effort included. Two cards side
+  // by side used to read `🌙 bg · delta-agents` and `🧠 bg3 · repo` and answer
+  // "Claude or Codex" and nothing else, so "why is this one thinking harder"
+  // and "did the bg pool follow /model" were invisible on the surface that
+  // exists to say what the job is. It goes on the HEAD, not a new line: the
+  // card is three lines on a phone and a fourth for a fact this small is a
+  // worse trade than a longer row.
+  const glyph = terminal ? outcomeGlyph(status) : scheduleId ? '⏰' : isCodex ? '🧠' : '🌙';
+  const label = scheduleId ? `#${scheduleId}${scheduleWhen ? ` · ${scheduleWhen}` : ''}` : `${lane || 'background'}`;
+  // A scheduled job's head names the schedule rather than a repo it did not
+  // choose, so the repo slot is empty there and the model follows the schedule.
+  const headRepo = scheduleId ? '' : repo;
+  const tail = engineBits(model, effort);
+  const full = [`${glyph} ${label}`, ...(headRepo ? [headRepo] : []), ...tail].join(' · ');
+  // Too long for one phone row: the REPO drops to its own line, never the
+  // model. A long repo name is recoverable from the title under it; a card that
+  // silently stopped naming its engine is the defect this change fixes.
+  //
+  // MEASURED WITH THE GLYPH NORMALIZED TO TWO UNITS, which is not fussiness:
+  // 🌙 and 🧠 are two UTF-16 units and ✅ and ❌ are one, so a head sitting on
+  // the boundary while running would UNWRAP when it finished and the message
+  // would reflow from four lines to three under the reader. The wrap has to be
+  // a property of the job, not of the phase it is in.
+  const wrapped = Boolean(headRepo) && full.length - glyph.length + 2 > HEAD_MAX;
+  const head = wrapped ? [`${glyph} ${label}`, ...tail].join(' · ') : full;
   const name = title ?? briefTitle(stripLaneRules(brief));
   const lines = [head];
+  if (wrapped) lines.push(headRepo);
   if (name) lines.push(name);
 
   if (phase === 'dispatch') {

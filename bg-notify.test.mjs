@@ -34,6 +34,7 @@ import {
   TASK_ANCHOR as TASK_SEPARATOR,
   TITLE_MAX,
   workerLine,
+  HEAD_MAX,
   WORKER_TICK_MS,
   WORKER_IDLE_MS,
 } from './bg-notify.mjs';
@@ -410,17 +411,29 @@ const noDashes = (str, where) => {
   const hits = String(str).match(/[–—]/g);
   if (hits) throw new Error(`${where}: ${hits.length} em/en dash(es) in\n${str}`);
 };
+// THE HEAD IS THE ONE EXEMPTION, and it is bounded rather than waived: it is a
+// single scannable row carrying lane, repo, model and effort, and the builder
+// itself drops the repo to its own line past HEAD_MAX. Every OTHER line of the
+// card still has to fit the bubble.
 const linesFit = (str, where) => {
-  for (const line of String(str).split('\n')) {
-    if (line.length <= LINE_MAX) continue;
+  const all = String(str).split('\n');
+  for (const [i, line] of all.entries()) {
+    const max = i === 0 ? HEAD_MAX : LINE_MAX;
+    if (line.length <= max) continue;
     if (/[~/]/.test(line) || /^["“]/.test(line.trim())) continue; // a path or a quoted title
-    throw new Error(`${where}: line of ${line.length} chars (max ${LINE_MAX})\n  ${line}`);
+    throw new Error(`${where}: line of ${line.length} chars (max ${max})\n  ${line}`);
   }
 };
+// Tokens stay banned everywhere. MODEL NAMES are banned everywhere BUT the
+// head, where naming the engine's model is now the point (Zalo, 2026-09-05:
+// two running cards that said "Claude" and "Codex" and nothing about what
+// either was thinking with). Keeping the ban on every other line is what stops
+// a model id drifting into the title or the step line, where it would be noise.
 const noTokensOrModels = (str, where) => {
   if (/\b\d[\d,.]*\s*(?:tokens?|tok)\b/i.test(str)) throw new Error(`${where}: token count in\n${str}`);
-  if (/\b(?:opus|sonnet|haiku|fable|gpt-[\d.]+|claude-(?:opus|sonnet|haiku|fable|\d)[a-z\d-]*)\b/i.test(str)) {
-    throw new Error(`${where}: model name in\n${str}`);
+  const belowHead = String(str).split('\n').slice(1).join('\n');
+  if (/\b(?:opus|sonnet|haiku|fable|gpt-[\d.]+|claude-(?:opus|sonnet|haiku|fable|\d)[a-z\d-]*)\b/i.test(belowHead)) {
+    throw new Error(`${where}: model name below the head in\n${str}`);
   }
 };
 
@@ -495,6 +508,102 @@ t('workerLine: everything unknown is omitted rather than guessed', () => {
   ok(!workerLine({ ...JOB, phase: 'done' }).includes('report'), 'an unwritten report prints no size');
 });
 
+// ---------------------------------------------------------------------------
+// The head names the ENGINE: lane, repo, model, effort.
+//
+// Zalo, 2026-09-05, with a screenshot of two running cards: "🌙 bg · delta-agents"
+// and "🧠 bg3 · repo" answered "Claude or Codex" and nothing else, so a worker
+// on the wrong model, or one thinking at a lower effort than its sibling, was
+// invisible on the one surface whose job is saying what the job is.
+// ---------------------------------------------------------------------------
+
+t('workerLine: ★ a Claude card names the pool pin and its effort', () => {
+  eq(
+    workerLine({ lane: 'bg', repo: 'delta-agents', model: 'opus', effort: 'xhigh', title: 'Audit the send gate', phase: 'running', elapsedSec: 252, steps: 23 }).split('\n')[0],
+    '🌙 bg · delta-agents · opus · xhigh',
+  );
+  // The registry sometimes knows the RESOLVED id rather than the alias. Both
+  // are shown as given: the card reports, it does not translate.
+  eq(
+    workerLine({ lane: 'bg', repo: 'delta-agents', model: 'claude-opus-5', effort: 'xhigh', phase: 'running', elapsedSec: 1 }).split('\n')[0],
+    '🌙 bg · delta-agents · claude-opus-5 · xhigh',
+  );
+});
+
+t('workerLine: ★ a Codex card names the Codex model, and keeps its own glyph', () => {
+  eq(
+    workerLine({ lane: 'bg3', repo: '90-day-cmaa-game-app', engine: 'codex', model: 'gpt-6-astra', effort: 'high', title: 'Port the install script', phase: 'running', elapsedSec: 252, steps: 23 }).split('\n')[0],
+    '🧠 bg3 · 90-day-cmaa-game-app · gpt-6-astra · high',
+  );
+});
+
+t('workerLine: a Codex run on the CLI\'s own settings says "default" rather than guessing', () => {
+  // codexSettings resolves to null when neither /codex model nor config.json
+  // sets one; the bridge then omits --model and the CLI picks. "default" is
+  // what /account and /engine already print for exactly that state.
+  eq(
+    workerLine({ lane: 'bg3', repo: 'zalo-os', engine: 'codex', model: 'default', effort: 'default', phase: 'running', elapsedSec: 1 }).split('\n')[0],
+    '🧠 bg3 · zalo-os · default · default',
+  );
+});
+
+t('workerLine: ★ a scheduled card carries the model after the schedule label', () => {
+  eq(
+    workerLine({ scheduleId: 3, scheduleWhen: 'daily 08:00', model: 'opus', effort: 'xhigh', title: "Summarize yesterday's commits", phase: 'running', elapsedSec: 72, steps: 14 }).split('\n')[0],
+    '⏰ #3 · daily 08:00 · opus · xhigh',
+  );
+  // And the outcome still lands in the head when it finishes.
+  ok(workerLine({ scheduleId: 3, scheduleWhen: 'daily 08:00', model: 'opus', effort: 'xhigh', phase: 'done', elapsedSec: 72 }).startsWith('✅ #3 · daily 08:00 · opus · xhigh'));
+});
+
+t('workerLine: ★ a re-attached worker shows NOTHING rather than a guess', () => {
+  // Survived a daemon restart: the pipe is gone, the spawn record may predate
+  // the field, and today's pool pin is not necessarily the one it started on.
+  // The failure this locks down is the literal strings "null"/"undefined"
+  // reaching his phone, which is what an unguarded template does.
+  const s = workerLine({ lane: 'bg', repo: 'delta-agents', title: 'A long job', phase: 'running', elapsedSec: 900, steps: 40 });
+  eq(s.split('\n')[0], '🌙 bg · delta-agents');
+  ok(!/null|undefined/.test(s), s);
+  for (const bad of [{ model: null }, { model: undefined }, { model: '' }, { model: '   ' }]) {
+    eq(workerLine({ lane: 'bg', repo: 'r', phase: 'running', elapsedSec: 1, effort: 'xhigh', ...bad }).split('\n')[0], '🌙 bg · r');
+  }
+});
+
+t('workerLine: an effort with no model is dropped, not shown alone', () => {
+  // "🌙 bg · delta-agents · xhigh" reads as if xhigh were the model.
+  eq(workerLine({ lane: 'bg', repo: 'delta-agents', effort: 'xhigh', phase: 'running', elapsedSec: 1 }).split('\n')[0], '🌙 bg · delta-agents');
+  // A model with no effort is fine: it is not ambiguous, only less complete.
+  eq(workerLine({ lane: 'bg', repo: 'delta-agents', model: 'opus', phase: 'running', elapsedSec: 1 }).split('\n')[0], '🌙 bg · delta-agents · opus');
+});
+
+t('workerLine: ★ past HEAD_MAX the REPO drops to its own line, never the model', () => {
+  const s = workerLine({
+    lane: 'bg3',
+    repo: 'claude-telegram-bridge',
+    engine: 'codex',
+    model: 'gpt-5.6-sol-preview',
+    effort: 'medium',
+    title: 'Port the card change',
+    phase: 'running',
+    elapsedSec: 5,
+  });
+  const lines = s.split('\n');
+  ok(lines[0].length <= HEAD_MAX, `head is ${lines[0].length} chars: ${lines[0]}`);
+  eq(lines[0], '🧠 bg3 · gpt-5.6-sol-preview · medium');
+  eq(lines[1], 'claude-telegram-bridge', 'the repo is recoverable on its own line');
+  eq(lines[2], 'Port the card change');
+  eq(lines[3], '⏳ 5s');
+  // The whole point of the rule: what got dropped is the fact already carried
+  // by the title under it, not the fact the head was widened to show.
+  ok(s.split('\n')[0].includes('gpt-5.6-sol-preview'), s);
+});
+
+t('workerLine: a head that still fits keeps the repo where it was', () => {
+  const s = workerLine({ lane: 'bg', repo: '90-day-cmaa-game-app', model: 'opus', effort: 'xhigh', title: 'T', phase: 'running', elapsedSec: 1 });
+  eq(s.split('\n').length, 3, 'the card must not grow a line it did not need');
+  eq(s.split('\n')[0], '🌙 bg · 90-day-cmaa-game-app · opus · xhigh');
+});
+
 t('workerLine: ★ every phase passes the house-style gates', () => {
   for (const [phase, extra] of [
     ['dispatch', { running: 4, queued: 2 }],
@@ -502,6 +611,12 @@ t('workerLine: ★ every phase passes the house-style gates', () => {
     ['done', { elapsedSec: 1080, steps: 214, chars: 24180 }],
     ['reading', { elapsedSec: 1080, steps: 214 }],
     ['done', { elapsedSec: 1080, status: 'failed' }],
+    // The model-bearing shapes, through the same gates: the head exemption is
+    // bounded by HEAD_MAX and nothing below it may carry a model.
+    ['running', { model: 'opus', effort: 'xhigh', elapsedSec: 252, steps: 23, lastAct: '💻 Bash npm test' }],
+    ['dispatch', { engine: 'codex', model: 'gpt-6-astra', effort: 'high', running: 2 }],
+    ['done', { model: 'claude-opus-5', effort: 'xhigh', elapsedSec: 1080, chars: 24180 }],
+    ['running', { repo: 'claude-telegram-bridge', engine: 'codex', model: 'gpt-5.6-sol-preview', effort: 'medium', elapsedSec: 5 }],
   ]) {
     const str = workerLine({ ...JOB, phase, ...extra });
     noDashes(str, `workerLine/${phase}`);
@@ -633,7 +748,7 @@ const WORKER_KEEPALIVE_MAX_MS = 1800000;
 let editCooldownUntil = 0;
 export const setCooldown = (v) => { editCooldownUntil = v; };
 let clock = 1788453512237;
-const dispatchPrompt = (text, lane) => { DISPATCHED.push({ text, lane: lane && lane.name }); lane.current = { prompt: text, startedAt: ++clock }; };
+const dispatchPrompt = (text, lane) => { DISPATCHED.push({ text, lane: lane && lane.name }); if (SCHED_LANDS_ON_CLAUDE) lane.current = { prompt: text, startedAt: ++clock }; };
 // chatState(), not a bare st. The harness used to export st, and the extracted
 // drain read st.cwd, so this suite went green while the real daemon threw
 // ReferenceError on every handoff (st is a local inside other functions, not a
@@ -643,7 +758,7 @@ export const chatState = () => ({ cwd: '/Users/owner/dev/claude-telegram-bridge'
 export const bgLanes = [];
 let bgSeq = 0;
 const BG_TASK_TIMEOUT_MS = 1;
-export const reset = (ls = []) => { SENT.length = 0; DISPATCHED.length = 0; EDITS.length = 0; LIVE.clear(); workerNotices.clear(); msgSeq = 0; CODEX_STARTED.length = 0; rotationPausedUntil = 0; codexFallbackValue = true; ENGINE_CFG = {}; CHAT_ENGINE_STATE = {}; bgLanes.length = 0; bgSeq = 0; for (const l of ls) { bgSeq++; bgLanes.push({ name: bgSeq === 1 ? 'bg' : 'bg' + bgSeq, isBg: true, n: bgSeq, current: null, queue: [], ...l }); } };
+export const reset = (ls = []) => { SENT.length = 0; DISPATCHED.length = 0; EDITS.length = 0; LIVE.clear(); workerNotices.clear(); msgSeq = 0; CODEX_STARTED.length = 0; rotationPausedUntil = 0; codexFallbackValue = true; ENGINE_CFG = {}; CHAT_ENGINE_STATE = {}; bgLanes.length = 0; bgSeq = 0; SAVED.length = 0; SCHED_LANDS_ON_CLAUDE = true; SCHEDULES = { nextId: 1, items: [] }; for (const l of ls) { bgSeq++; bgLanes.push({ name: bgSeq === 1 ? 'bg' : 'bg' + bgSeq, isBg: true, n: bgSeq, current: null, queue: [], ...l }); } };
 let queueContent = '[]';
 export const setQueue = (v) => { queueContent = JSON.stringify(v); };
 const readFileSync = () => queueContent;
@@ -687,6 +802,31 @@ const runCodex = (text, opts) => { const runId = 'codex-' + (++clock); CODEX_STA
 const DEFAULT_CWD = '/Users/owner/dev';
 const existsSync = (p) => p === '/Users/owner/dev/ops-dash';
 const OWNER_TZ = 'Europe/Berlin';
+// THE CARD RESOLVERS, by the same module-binding names production uses, the
+// same rule as chatState above. The drain reads them out of scope to put the
+// model on the worker card, so a harness missing them makes every notice throw
+// ReferenceError and eat the notification, which is exactly how this suite
+// caught them being added. Fixed values rather than the real resolvers: this
+// file asserts that the drain PASSES a model through to the card, not how the
+// two engines each resolve one.
+const claudeCardSettings = () => ({ model: 'opus', effort: 'xhigh' });
+const codexCardSettings = () => ({ model: 'gpt-6-astra', effort: 'high' });
+// The schedule store, in memory. checkSchedules is extracted rather than
+// mirrored for the same reason the drain is: it is the SECOND card call site
+// and it had no coverage at all, which is how it came to stamp the Claude pool
+// pin on a job that dispatchPrompt had routed to Codex.
+export let SCHEDULES = { nextId: 1, items: [] };
+export const setSchedules = (items) => { SCHEDULES = { nextId: items.length + 1, items }; };
+export const SAVED = [];
+const loadSchedules = () => JSON.parse(JSON.stringify(SCHEDULES));
+const saveSchedules = (v) => { SAVED.push(v); SCHEDULES = v; };
+const localToday = () => '2026-09-05';
+const localHHMM = () => '08:30';
+// The one lever the schedule test needs: dispatchPrompt claims lane.current for
+// a Claude route and leaves it null for a Codex one, which is the ONLY signal
+// checkSchedules has about which engine took the job.
+export let SCHED_LANDS_ON_CLAUDE = true;
+export const setSchedRouting = (v) => { SCHED_LANDS_ON_CLAUDE = v; };
 `;
 const B = await import(
   'data:text/javascript,' +
@@ -704,7 +844,8 @@ const B = await import(
         grabFn('editWorkerNotice'),
         grabFn('drainBgHandoff'),
         grabFn('notifyOwnerBgFinished'),
-        'export { drainBgHandoff, notifyOwnerBgFinished, getBgLane, startWorkerNotice, editWorkerNotice, workerNotices };',
+        grabFn('checkSchedules'),
+        'export { drainBgHandoff, notifyOwnerBgFinished, getBgLane, startWorkerNotice, editWorkerNotice, workerNotices, checkSchedules };',
       ].join('\n'),
     )
 );
@@ -720,7 +861,11 @@ t('bridge.mjs actually sends the new handoff notice, not the old clip', () => {
   eq(
     B.SENT[0],
     [
-      '🌙 bg2 · claude-telegram-bridge',
+      // The head names the ENGINE'S MODEL AND EFFORT, from the pool pin the
+      // spawn a few lines later puts in argv. The card used to read
+      // "🌙 bg2 · claude-telegram-bridge" and answer "Claude or Codex" and
+      // nothing else.
+      '🌙 bg2 · claude-telegram-bridge · opus · xhigh',
       'Fix: background-lane Telegram notifications',
       '⏳ starting… · 2 workers',
       // The PHONE command. The old notice taught the terminal one to a reader
@@ -740,6 +885,47 @@ t('the worker still receives the FULL brief, rules included', () => {
   ok(B.DISPATCHED[0].text.endsWith('body'), 'the worker lost its task');
   eq(B.DISPATCHED[0].lane, 'bg2', 'dispatched to a different lane than the notice named');
 });
+
+// ---------------------------------------------------------------------------
+// The SECOND card call site: a scheduled `--run` job.
+//
+// It had no coverage at all, which is how it came to stamp the Claude pool pin
+// on the head of a job dispatchPrompt had handed to Codex.
+// ---------------------------------------------------------------------------
+
+t('a scheduled run puts up the same card, with the pool pin on it', () => {
+  B.reset([{}]);
+  B.setSchedules([{ id: 25, kind: 'daily', at: '08:30', run: true, text: "Summarize yesterday's commits" }]);
+  B.checkSchedules();
+  eq(B.DISPATCHED.length, 1, 'the job itself must always be dispatched');
+  eq(B.SENT.length, 1);
+  eq(B.SENT[0].split('\n')[0], '⏰ #25 · daily 08:30 · opus · xhigh');
+});
+
+t('★ a scheduled run that did NOT land on the Claude lane names no model at all', () => {
+  // dispatchPrompt re-resolves the engine on EVERY route in, so a bg lane
+  // settled to Codex sends this job to runCodex and leaves lane.current null.
+  // Stamping BG_MODEL regardless printed "opus · xhigh" over a job Codex was
+  // running, on the one line whose purpose is naming the engine.
+  B.reset([{}]);
+  B.setSchedRouting(false); // routed away: nothing claimed the Claude lane
+  B.setSchedules([{ id: 25, kind: 'daily', at: '08:30', run: true, text: "Summarize yesterday's commits" }]);
+  B.checkSchedules();
+  eq(B.DISPATCHED.length, 1, 'the job still runs; only the card is quieter');
+  eq(B.SENT[0].split('\n')[0], '⏰ #25 · daily 08:30');
+  ok(!/opus|xhigh/.test(B.SENT[0]), B.SENT[0]);
+});
+
+t('a plain reminder is still a reminder, with no card and no model', () => {
+  B.reset([{}]);
+  B.setSchedules([{ id: 4, kind: 'daily', at: '08:30', run: false, text: 'call the accountant' }]);
+  B.checkSchedules();
+  eq(B.DISPATCHED.length, 0);
+  eq(B.SENT.length, 1);
+  eq(B.SENT[0], '⏰ Reminder: call the accountant');
+});
+
+
 
 t('the notice names the same lane the job is dispatched to', () => {
   B.reset([{}]);
