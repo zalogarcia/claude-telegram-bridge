@@ -19,6 +19,7 @@ import {
   existsSync,
   statSync,
   mkdirSync,
+  realpathSync,
   renameSync,
   readdirSync,
   unlinkSync,
@@ -30,7 +31,7 @@ import {
 import net from 'node:net';
 import { homedir, hostname, platform } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import readline from 'node:readline';
 import { mdToRichBlocks, chunkBlocks, shouldUseRich, stripModeMarkers, detailsToHtml } from './rich-format.mjs';
 import { chunks, escHtml, stripHtml, mdToTelegramHtml } from './md-format.mjs';
@@ -141,6 +142,7 @@ import {
   validateRequest,
   REASONS as STEER_REASONS,
 } from './bg-steer.mjs';
+import { claimSteerSock, releaseSteerSock } from './steer-sock.mjs';
 import {
   CODEX_DEFAULT_TIMEOUT_MS,
   CODEX_LANE,
@@ -243,6 +245,28 @@ import {
 
 const HOME = homedir();
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+// IS THIS FILE THE PROGRAM, OR SOMETHING SOMEBODY IMPORTED?
+//
+// It used to be only ever the program: main() ran at the bottom unconditionally,
+// so `import('./bridge.mjs')` booted a full daemon. On 2026-09-05 a session did
+// exactly that as a syntax check. The second daemon re-attached to a live
+// background worker, exited, and took the real daemon's steer socket with it
+// (see steer-sock.mjs for that half). Every test suite in this repo carries a
+// comment explaining that it extracts functions out of this file by SOURCE
+// because importing it would boot a daemon; this constant is what retires that
+// workaround and makes an import inert.
+//
+// argv[1] goes through realpath because ESM resolves import.meta.url through
+// symlinks: without it, a daemon started via a symlinked path would read as an
+// import and never boot at all.
+const IS_ENTRYPOINT = (() => {
+  try {
+    return !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false; // argv[1] unreadable or gone: treat as imported, which starts nothing
+  }
+})();
 const CONFIG_FILE = process.env.BRIDGE_CONFIG || path.join(SCRIPT_DIR, 'config.json');
 const STATE_FILE = path.join(SCRIPT_DIR, 'state.json');
 
@@ -299,7 +323,11 @@ function confObj(key) {
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN || fileConfig.botToken || claudeSettingsEnv.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = String(process.env.TELEGRAM_CHAT_ID || fileConfig.chatId || claudeSettingsEnv.TELEGRAM_CHAT_ID || '');
 
-if (!TOKEN || !CHAT_ID) {
+// Only the PROGRAM dies over missing credentials. An import has nothing to
+// authenticate, and a module that calls process.exit() the moment it is loaded
+// is not importable at all: on a fresh clone with no config.json, the test that
+// proves importing this file is inert could never even run.
+if ((!TOKEN || !CHAT_ID) && IS_ENTRYPOINT) {
   console.error(
     '[bridge] Missing Telegram credentials.\n' +
       `  Looked in: ${CONFIG_FILE}, $TELEGRAM_BOT_TOKEN/$TELEGRAM_CHAT_ID, ~/.claude/settings.local.json\n` +
@@ -446,7 +474,9 @@ function loadState() {
 }
 const state = loadState();
 state.chats ||= {};
-mkdirSync(INBOX_DIR, { recursive: true });
+// Creating a directory is the one module level write left, and it belongs to the
+// running daemon: an import must not leave a folder behind in a clean checkout.
+if (IS_ENTRYPOINT) mkdirSync(INBOX_DIR, { recursive: true });
 
 function saveState() {
   writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
@@ -2288,14 +2318,19 @@ function handleSteerRequest(raw) {
   return steerInto(req.target, req.text);
 }
 
+// THE SOCKET IS CLAIMED BEFORE ANYTHING ELSE IN main() HAPPENS, not here.
+//
+// This function used to open with an unconditional unlink of the socket file,
+// commented "stale file from a daemon that died", which is true right up until
+// the day the other daemon is alive. On 2026-09-05 it deleted a healthy
+// LaunchAgent daemon's socket out from under it and left every `bg.mjs steer`
+// answering "daemon not reachable" for hours. The claim now happens in
+// guardSteerSockOwnership() below, before re-attach, because by the time we get
+// here a second daemon has already adopted the first one's workers.
+//
 // One request per connection, answered and closed. Every failure mode answers
 // SOMETHING: a CLI left hanging on a silent socket is worse than a refusal.
 function startSteerServer() {
-  try {
-    if (existsSync(STEER_SOCK)) unlinkSync(STEER_SOCK); // stale file from a daemon that died
-  } catch (e) {
-    console.error('[bridge] could not clear the stale steer socket:', e.message);
-  }
   const server = net.createServer((sock) => {
     let buf = '';
     let answered = false;
@@ -2336,10 +2371,57 @@ function startSteerServer() {
       answer(res);
     });
   });
-  server.on('error', (e) => console.error('[bridge] steer socket error:', e.message));
-  server.listen(STEER_SOCK, () => console.log(`[bridge] steer socket listening at ${STEER_SOCK}`));
+  server.on('error', (e) => {
+    // EADDRINUSE HERE MEANS A SECOND DAEMON, and the ownership guard already
+    // said we could have the name, so we lost a race with a rival that started
+    // inside the same window. Carrying on would leave this process running as a
+    // full second daemon with no control socket, fighting the other one for
+    // getUpdates in a 409 loop forever. Die and let the service manager try
+    // again. Any OTHER listen error costs steering only, and steering is not
+    // worth the whole bridge: log it and keep serving Telegram.
+    if (e.code === 'EADDRINUSE') {
+      console.error(`[bridge] not starting: another process bound ${STEER_SOCK} first (${e.message})`);
+      process.exit(1);
+    }
+    console.error('[bridge] steer socket error:', e.message);
+  });
+  server.listen(STEER_SOCK, () =>
+    console.log(`[bridge] steer socket listening at ${STEER_SOCK} (owner pid ${process.pid})`),
+  );
   server.unref(); // the poll loop keeps the daemon alive; this must never do it alone
   return server;
+}
+
+// The startup half of socket ownership. Runs before re-attach: adopting another
+// daemon's workers is the expensive part of booting twice, so the refusal has to
+// land before that, not at bind time.
+async function guardSteerSockOwnership() {
+  const decision = await claimSteerSock(STEER_SOCK);
+  if (decision.action === 'refuse') {
+    console.error(
+      `[bridge] not starting: ${decision.reason}.\n` +
+        `  socket: ${STEER_SOCK}\n` +
+        '  This machine runs ONE bridge daemon. If that is wrong, stop the other one, then\n' +
+        '  delete BOTH the socket and its .pid file (deleting one and not the other just\n' +
+        '  moves the confusion), and start a fresh daemon.',
+    );
+    return false;
+  }
+  if (decision.action === 'replace') console.log(`[bridge] replacing a stale steer socket: ${decision.reason}`);
+  if (decision.recordError) console.error('[bridge] could not record the steer socket owner:', decision.recordError);
+  return true;
+}
+
+// The shutdown half. Only the recorded owner unlinks, so a process that never
+// bound (or one that lost the claim) can never take a live listener's name away.
+function releaseSteerSockIfOurs(why) {
+  try {
+    const res = releaseSteerSock(STEER_SOCK);
+    if (res.unlinked) console.log(`[bridge] steer socket released (${why})`);
+    else if (res.ownerPid) console.log(`[bridge] leaving the steer socket alone: ${res.reason}`);
+  } catch {
+    // Never let cleanup be the reason a shutdown fails.
+  }
 }
 
 /**
@@ -7922,6 +8004,13 @@ async function main() {
     process.exit(0);
   }
 
+  // ONE DAEMON PER MACHINE, enforced before a single side effect of booting.
+  // Everything below this line touches shared state the other daemon is using:
+  // it re-attaches to its background workers, edits its Telegram messages and
+  // takes over its socket. The selftest above is exempt on purpose, it binds
+  // nothing and exits.
+  if (!(await guardSteerSockOwnership())) process.exit(1);
+
   // Which engines this machine actually has, said once at boot. A Codex-first
   // install with no `claude` is a supported configuration, not a broken one, so
   // it logs a fact rather than a warning; the reverse (no codex) matters for
@@ -8020,25 +8109,38 @@ async function main() {
   await pollLoop();
 }
 
-process.on('SIGTERM', () => {
-  // CHAT LANE ONLY. This used to loop over allLanes() and kill every child,
-  // which is the third way a restart took background work down with it — and it
-  // would have quietly cancelled out the detaching above, since a SIGTERM we
-  // send by pid reaches a worker no matter what process group it sits in.
-  // Background workers are meant to outlive us: they keep writing their log, and
-  // main() re-attaches to them on the next boot. The chat lane is different —
-  // the user is sitting there waiting on that reply, and a half-finished bubble
-  // is worse than a clean stop.
-  LANES.main.current?.child?.kill('SIGTERM');
-  // The Codex app-server is OURS, one per daemon, and it holds no work that can
-  // outlive us: its turns are chat turns and its threads live on OpenAI's side,
-  // where the next boot resumes them. Leaving it running would leak one process
-  // per restart.
-  killCodexAppServer();
-  process.exit(0);
-});
+// NOTHING BELOW RUNS ON IMPORT. Loading this file used to boot a daemon, which
+// is how a syntax check took the real one's steer socket down (see
+// IS_ENTRYPOINT and steer-sock.mjs). The handlers are inside the guard too: a
+// SIGTERM handler that kills lanes belongs to the process that owns them.
+if (IS_ENTRYPOINT) {
+  process.on('SIGTERM', () => {
+    // CHAT LANE ONLY. This used to loop over allLanes() and kill every child,
+    // which is the third way a restart took background work down with it, and it
+    // would have quietly cancelled out the detaching above, since a SIGTERM we
+    // send by pid reaches a worker no matter what process group it sits in.
+    // Background workers are meant to outlive us: they keep writing their log, and
+    // main() re-attaches to them on the next boot. The chat lane is different:
+    // the user is sitting there waiting on that reply, and a half-finished bubble
+    // is worse than a clean stop.
+    LANES.main.current?.child?.kill('SIGTERM');
+    // The Codex app-server is OURS, one per daemon, and it holds no work that can
+    // outlive us: its turns are chat turns and its threads live on OpenAI's side,
+    // where the next boot resumes them. Leaving it running would leak one process
+    // per restart.
+    killCodexAppServer();
+    releaseSteerSockIfOurs('SIGTERM');
+    process.exit(0);
+  });
 
-main().catch((e) => {
-  console.error('[bridge] fatal:', e);
-  process.exit(1);
-});
+  // Every other way out: a fatal error, an explicit exit, the event loop
+  // draining. Node unlinks a bound pipe for us on a clean close, but only for a
+  // socket THIS process bound, and only on some of these paths. Doing it here,
+  // ownership checked, makes the .pid file go with it either way.
+  process.on('exit', () => releaseSteerSockIfOurs('exit'));
+
+  main().catch((e) => {
+    console.error('[bridge] fatal:', e);
+    process.exit(1);
+  });
+}

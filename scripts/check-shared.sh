@@ -57,6 +57,8 @@ SHARED_MODULES=(
   account-buttons.test.mjs
   credential-store.mjs
   credential-store.test.mjs
+  steer-sock.mjs
+  steer-sock.test.mjs
 )
 
 # NOT LISTED, and why. These modules came from the private sibling and behave

@@ -276,6 +276,17 @@ Use `steer` when the brief is still right and you are adding or correcting an
 instruction. Kill and re-dispatch only when the brief itself was wrong, because
 that throws the warm context away.
 
+**The socket is owned.** The pid of the daemon that bound it is written to
+`steer.sock.pid` beside it (`steer-sock.mjs`). A daemon that finds the socket
+owned by a live daemon refuses to start and logs whose pid holds it, instead of
+deleting it; on the way out, a process unlinks the socket only when that record
+names itself. This is not theoretical tidiness: on 2026-09-05 a
+`node -e "import('./bridge.mjs')"` syntax check booted a second daemon, which
+deleted the live daemon's socket on entry and left `bg.mjs steer` and
+`bg.mjs ps` answering "daemon not reachable" for hours while the daemon itself
+was healthy. Importing `bridge.mjs` is now inert (it runs `main()` only as the
+process entry point), so syntax checks use `node --check bridge.mjs`.
+
 **The socket is local and unauthenticated.** It is a filesystem socket
 (`steer.sock`) next to `bridge.mjs`, with no network listener of any kind,
 reachable by exactly the processes that could already read this directory, and

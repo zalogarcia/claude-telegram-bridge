@@ -22,3 +22,4 @@ inbox/
 node_modules/
 .DS_Store
 .vercel
+steer.sock.pid
